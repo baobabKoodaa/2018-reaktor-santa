@@ -134,18 +134,26 @@ public class A {
             writeAnsToFile(ans);
         }
 
+        List<Integer> selectedIds;
+        List<Integer> selectedIndicesForRemoval;
+        int currWeightSum;
+        double targetDistX2;
+        int acceptableClusterSparsity;
+        boolean[] used;
+
         void createTrip() {
             // These will be filled
-            List<Integer> selectedIds = null;
-            List<Integer> selectedIndicesForRemoval = null;
-            int currWeightSum = 0;
-            double targetDistX2 = 0;
+            selectedIds = null;
+            selectedIndicesForRemoval = null;
+            currWeightSum = 0;
+            targetDistX2 = 0;
 
-            // Increase acceptable detour cost until utz >= 0.98 (recreate trip after each increase)
-            int acceptableDetourCost = 500;
-            for (double utz=0; utz<0.98 && acceptableDetourCost<5000000; acceptableDetourCost *= 1.10) {
+            // High-level idea: we want this trip to have high utz with minimal cluster sparsity and minimal detours.
+            // Implementation: recreate trip until utz >= 0.98. Each recreation has ...
+            acceptableClusterSparsity = 500;
+            for (double utz=0; utz<0.98 && acceptableClusterSparsity<5000000; acceptableClusterSparsity *= 1.10) {
 
-                boolean[] used = new boolean[endId];
+                used = new boolean[endId];
 
                 // Lock down the furthest target
                 int currId = candidates.get(candidates.size()-1);
@@ -155,45 +163,19 @@ public class A {
                 selectedIds.add(currId);
                 selectedIndicesForRemoval.add(candidates.size()-1);
                 currWeightSum = w[currId];
-
                 targetDistX2 = 2 * dist[1][currId];
 
-                // TODO detours on the way to target as well!
-                // TODO make threshold expand on the way up and shrink on the way down
                 // TODO add special consideration for collecting "problem children"
 
-                while (true) {
+                collectClusterAroundTarget();
 
-                    // Choose best candidate detour
-                    int bestCandidateIndex = -1;
-                    double bestCandidateDetourCost = Double.POSITIVE_INFINITY;
-                    for (int candidateIndex=candidates.size()-2; candidateIndex>=0; candidateIndex--) {
-                        int candidateId = candidates.get(candidateIndex);
-                        if (used[candidateId]) continue;
-                        if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+                // Find first/last entry in order to discover detours to/from cluster
+                localWalkImprovementsToTrip(selectedIds);
+                int firstEntry = selectedIds.get(0);
+                int lastEntry = selectedIds.get(selectedIds.size()-1);
 
-                            // New definition: Min of dists to any previous stop within trip
-                            double detourCost = Double.POSITIVE_INFINITY;
-                            for (int id : selectedIds) {
-                                detourCost = Math.min(detourCost, dist[id][candidateId]);
-                            }
-
-                            if (detourCost <= acceptableDetourCost && detourCost < bestCandidateDetourCost) {
-                                bestCandidateDetourCost = detourCost;
-                                bestCandidateIndex = candidateIndex;
-                            }
-                        }
-                    }
-                    if (bestCandidateIndex < 0) break; // No more acceptable detours available
-
-                    // Add best candidate detour to current route
-                    int candidateId = candidates.get(bestCandidateIndex);
-                    used[candidateId] = true;
-                    currWeightSum += w[candidateId];
-                    selectedIds.add(candidateId);
-                    selectedIndicesForRemoval.add(bestCandidateIndex);
-                    currId = candidateId;
-                }
+                collectZigZags(firstEntry);
+                collectZigZags(lastEntry);
 
                 utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
             }
@@ -223,13 +205,66 @@ public class A {
                             "detours " + Math.round((trip-targetDistX2)/1000) + "km, " +
                             selectedIds.size() + " stops, " +
                             "utz " + utz +
-                            ", acceptableDetourCost " + Math.round(acceptableDetourCost/1000) + "km "
+                            ", acceptableClusterSparsity " + Math.round(acceptableClusterSparsity/1000) + "km "
             );
 
             // Remove selected from candidates
             Collections.sort(selectedIndicesForRemoval, Collections.reverseOrder()); // Need to delete in reverse order
             for (int index : selectedIndicesForRemoval) {
                 candidates.remove(index);
+            }
+        }
+
+        void collectClusterAroundTarget() {
+            while (true) {
+                int bestIndex = -1;
+                double bestSparsity = Double.POSITIVE_INFINITY;
+                for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
+                    int candidateId = candidates.get(candidateIndex);
+                    if (used[candidateId]) continue;
+                    if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+
+                        // New definition: Min of dists to any previous stop within trip
+                        double sparsity = Double.POSITIVE_INFINITY;
+                        for (int id : selectedIds) {
+                            sparsity = Math.min(sparsity, dist[id][candidateId]);
+                        }
+                        // TODO replace sparsity with a more advanced heuristic which gives some consideration to WEIGHT
+                        // as well as possibly other factors, such as problem-childness-from-previous rounds or number
+                        // of close neighbors still available as candidates, etc.
+
+                        if (sparsity <= acceptableClusterSparsity && sparsity < bestSparsity) {
+                            bestSparsity = sparsity;
+                            bestIndex = candidateIndex;
+                        }
+                    }
+                }
+                if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight and/or max acceptable sparsity)
+
+                // Add closest node to cluster
+                int candidateId = candidates.get(bestIndex);
+                used[candidateId] = true;
+                currWeightSum += w[candidateId];
+                selectedIds.add(candidateId);
+                selectedIndicesForRemoval.add(bestIndex);
+            }
+        }
+
+        void collectZigZags(int nodeClosestToHome) {
+            // TODO make threshold expand on the way up and shrink on the way down
+            for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
+                int candidateId = candidates.get(candidateIndex);
+                if (used[candidateId]) continue;
+                if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+                    double detourCost = dist[nodeClosestToHome][candidateId] + dist[candidateId][1] - dist[nodeClosestToHome][1];
+                    if (detourCost <= 0.01 * acceptableClusterSparsity) {
+                        used[candidateId] = true;
+                        currWeightSum += w[candidateId];
+                        selectedIds.add(candidateId);
+                        selectedIndicesForRemoval.add(candidateIndex);
+                        nodeClosestToHome = candidateId;
+                    }
+                }
             }
         }
 
