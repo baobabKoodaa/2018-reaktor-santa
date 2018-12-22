@@ -119,7 +119,7 @@ public class A {
             ans = new ArrayList<>();
             candidates = new ArrayList<>();
 
-            // Order candidates based on distance from Santa
+            // Order candidates based on distance from Santa // TODO try more advanced heuristic here as well
             List<IDval> sortHelper = new ArrayList<>();
             for (int id=2; id<endId; id++) sortHelper.add(new IDval(id, (long)dist[1][id]));
             Collections.sort(sortHelper);
@@ -132,6 +132,8 @@ public class A {
 
             System.out.println("Solution value " + formatAnsValue(meters));
             writeAnsToFile(ans);
+
+            // TODO simulated annealing type stuff with complete route
         }
 
         List<Integer> selectedIds;
@@ -150,19 +152,22 @@ public class A {
 
             // High-level idea: we want this trip to have high utz with minimal cluster sparsity and minimal detours.
             // Implementation: recreate trip until utz >= 0.98. Each recreation has ...
-            acceptableClusterSparsity = 500;
-            for (double utz=0; utz<0.98 && acceptableClusterSparsity<5000000; acceptableClusterSparsity *= 1.10) {
+            for (acceptableClusterSparsity = 50; utz()<0.98; acceptableClusterSparsity *= 1.02) {
 
+                if (acceptableClusterSparsity > 10000000) break; // special break condition sometimes needed to complete LAST trip
+
+                // Reinitialize globals
                 used = new boolean[endId];
+                selectedIds = new ArrayList<>();
+                selectedIndicesForRemoval = new ArrayList<>();
+                currWeightSum = 0;
 
                 // Lock down the furthest target
                 int currId = candidates.get(candidates.size()-1);
                 used[currId] = true;
-                selectedIds = new ArrayList<>();
-                selectedIndicesForRemoval = new ArrayList<>();
                 selectedIds.add(currId);
                 selectedIndicesForRemoval.add(candidates.size()-1);
-                currWeightSum = w[currId];
+                currWeightSum += w[currId];
                 targetDistX2 = 2 * dist[1][currId];
 
                 // TODO add special consideration for collecting "problem children"
@@ -170,14 +175,13 @@ public class A {
                 collectClusterAroundTarget();
 
                 // Find first/last entry in order to discover detours to/from cluster
-                localWalkImprovementsToTrip(selectedIds);
-                int firstEntry = selectedIds.get(0);
-                int lastEntry = selectedIds.get(selectedIds.size()-1);
+//                localWalkImprovementsToTrip(selectedIds);
+//                int firstEntry = selectedIds.get(0);
+//                int lastEntry = selectedIds.get(selectedIds.size()-1);
+//
+//                collectZigZags(firstEntry);
+//                collectZigZags(lastEntry);
 
-                collectZigZags(firstEntry);
-                collectZigZags(lastEntry);
-
-                utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
             }
 
             localWalkImprovementsToTrip(selectedIds);
@@ -197,14 +201,13 @@ public class A {
             ans.add(ansLine);
 
             // Print statistics
-            double utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
             System.out.println(
                     "Trip #" + ans.size() +
                             " overall " + Math.round(trip/1000) + "km, " +
                             "target " + Math.round(targetDistX2/2000) + "km, " +
                             "detours " + Math.round((trip-targetDistX2)/1000) + "km, " +
                             selectedIds.size() + " stops, " +
-                            "utz " + utz +
+                            "utz " + utz() +
                             ", acceptableClusterSparsity " + Math.round(acceptableClusterSparsity/1000) + "km "
             );
 
@@ -213,6 +216,10 @@ public class A {
             for (int index : selectedIndicesForRemoval) {
                 candidates.remove(index);
             }
+        }
+
+        double utz() {
+            return 1.0 * currWeightSum / MAX_WEIGHT;
         }
 
         void collectClusterAroundTarget() {
@@ -224,14 +231,14 @@ public class A {
                     if (used[candidateId]) continue;
                     if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
 
-                        // New definition: Min of dists to any previous stop within trip
+                        // Sparsity == Min of dists to any previous stop within trip
                         double sparsity = Double.POSITIVE_INFINITY;
                         for (int id : selectedIds) {
                             sparsity = Math.min(sparsity, dist[id][candidateId]);
                         }
                         // TODO replace sparsity with a more advanced heuristic which gives some consideration to WEIGHT
                         // as well as possibly other factors, such as problem-childness-from-previous rounds or number
-                        // of close neighbors still available as candidates, etc.
+                        // of close neighbors still available as candidates, or distance from 1 (test for both pos. and neg. effect)
 
                         if (sparsity <= acceptableClusterSparsity && sparsity < bestSparsity) {
                             bestSparsity = sparsity;
