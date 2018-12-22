@@ -172,6 +172,11 @@ public class A {
                                 // New detourCost defined as dist from most recent: works better!!
                                 detourCost = dist[currId][candidateId];
 
+                                // Experimental: min of costs for insertion at any position
+                                for (int oldMember : selectedIds) {
+                                    detourCost = Math.min(detourCost, dist[oldMember][candidateId]);
+                                }
+
 
 
                                 if (detourCost <= acceptableDetourCost && detourCost < bestCandidateDetourCost) {
