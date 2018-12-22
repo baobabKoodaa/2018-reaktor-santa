@@ -139,7 +139,7 @@ public class A {
         List<Integer> selectedIds;
         List<Integer> selectedIndicesForRemoval;
         int currWeightSum;
-        double targetDistX2;
+        double targetDist;
         int acceptableClusterSparsity;
         boolean[] used;
 
@@ -148,7 +148,7 @@ public class A {
             selectedIds = null;
             selectedIndicesForRemoval = null;
             currWeightSum = 0;
-            targetDistX2 = 0;
+            targetDist = 0;
 
             // High-level idea: we want this trip to have high utz with minimal cluster sparsity and minimal detours.
             // Implementation: recreate trip until utz >= 0.98. Each recreation has ...
@@ -168,7 +168,7 @@ public class A {
                 selectedIds.add(currId);
                 selectedIndicesForRemoval.add(candidates.size()-1);
                 currWeightSum += w[currId];
-                targetDistX2 = 2 * dist[1][currId];
+                targetDist = dist[1][currId];
 
                 // TODO add special consideration for collecting "problem children"
 
@@ -204,8 +204,8 @@ public class A {
             System.out.println(
                     "Trip #" + ans.size() +
                             " overall " + Math.round(trip/1000) + "km, " +
-                            "target " + Math.round(targetDistX2/2000) + "km, " +
-                            "detours " + Math.round((trip-targetDistX2)/1000) + "km, " +
+                            "target " + Math.round(targetDist/1000) + "km, " +
+                            "detours " + Math.round((trip-2*targetDist)/1000) + "km, " +
                             selectedIds.size() + " stops, " +
                             "utz " + utz() +
                             ", acceptableClusterSparsity " + Math.round(acceptableClusterSparsity/1000) + "km "
@@ -234,11 +234,14 @@ public class A {
                         // Sparsity == Min of dists to any previous stop within trip
                         double sparsity = Double.POSITIVE_INFINITY;
                         for (int id : selectedIds) {
-                            sparsity = Math.min(sparsity, dist[id][candidateId]);
+                            // Heuristic experiment: as we cluster, we should slightly favor nodes closer to home
+                            double oldHeuristic = dist[id][candidateId];
+                            double newHeuristic = dist[id][candidateId] * targetDist / Math.pow(dist[candidateId][1], 1.3);
+                            sparsity = Math.min(sparsity, newHeuristic);
                         }
-                        // TODO replace sparsity with a more advanced heuristic which gives some consideration to WEIGHT
+                        // TODO more advanced heuristic which gives some consideration to WEIGHT
                         // as well as possibly other factors, such as problem-childness-from-previous rounds or number
-                        // of close neighbors still available as candidates, or distance from 1 (test for both pos. and neg. effect)
+                        // of close neighbors still available as candidates
 
                         if (sparsity <= acceptableClusterSparsity && sparsity < bestSparsity) {
                             bestSparsity = sparsity;
