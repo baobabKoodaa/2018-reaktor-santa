@@ -27,18 +27,18 @@ public class A {
 
         /****************************** START READING HERE ********************************/
 
-        int MAX_WEIGHT = 10000000;
-
-        int endId;
-        double[][] c;
-        int[] w;
-        double[][] dist;
-
         void solve() throws Exception {
             readInput();
             preCalcAllDistances();
             route();
         }
+
+        int MAX_WEIGHT = 10000000;
+
+        int endId;
+        double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
+        int[] w;
+        double[][] dist;
 
         void readInput() throws FileNotFoundException {
             System.out.println("Reading input...");
@@ -107,143 +107,134 @@ public class A {
             return R * c;
         }
 
+        double meters = 0;
+        List<String> ans;
+        List<Integer> candidates;
+
         void route() {
             System.out.println("Routing...");
 
-            double meters = 0;
-            List<String> ans = new ArrayList<>();
+            // These will be filled
+            meters = 0;
+            ans = new ArrayList<>();
+            candidates = new ArrayList<>();
 
-            // Order targets based on distance from Santa
-            List<IDval> sorted = new ArrayList<>();
-            for (int id=2; id<endId; id++) sorted.add(new IDval(id, (long)dist[1][id]));
-            Collections.sort(sorted);
-            List<Integer> todo = new ArrayList<>();
-            for (IDval pair : sorted) todo.add(pair.id);
+            // Order candidates based on distance from Santa
+            List<IDval> sortHelper = new ArrayList<>();
+            for (int id=2; id<endId; id++) sortHelper.add(new IDval(id, (long)dist[1][id]));
+            Collections.sort(sortHelper);
+            for (IDval pair : sortHelper) candidates.add(pair.id);
 
-
-            // This loop creates trips.
-            while (!todo.isEmpty()) {
-
-                // These will be filled
-                List<Integer> selectedIds = null;
-                List<Integer> selectedIndicesForRemoval = null;
-                int currWeightSum = 0;
-                double targetDistX2 = 0;
-
-                // Increase acceptable detour cost until utz >= 0.98 (recreate trip after each increase)
-                int acceptableDetourCost = 500;
-                for (double utz=0; utz<0.98 && acceptableDetourCost<5000000; acceptableDetourCost *= 1.10) {
-
-                    boolean[] used = new boolean[endId];
-
-                    // Lock down the furthest target
-                    int currId = todo.get(todo.size()-1);
-                    used[currId] = true;
-                    selectedIds = new ArrayList<>();
-                    selectedIndicesForRemoval = new ArrayList<>();
-                    selectedIds.add(currId);
-                    selectedIndicesForRemoval.add(todo.size()-1);
-                    currWeightSum = w[currId];
-
-                    targetDistX2 = 2 * dist[1][currId];
-
-                    // TODO detours on the way to target as well!
-                    // TODO make threshold expand on the way up and shrink on the way down
-                    // TODO add special consideration for collecting "problem children"
-
-                    // Start iterating targets furthest to closest, can we add them to this route?
-
-                    while (true) {
-
-                        // Choose best candidate detour
-                        int bestCandidateIndex = -1;
-                        double bestCandidateDetourCost = Double.POSITIVE_INFINITY;
-                        for (int candidateIndex=todo.size()-2; candidateIndex>=0; candidateIndex--) {
-                            int candidateId = todo.get(candidateIndex);
-                            if (used[candidateId]) continue;
-                            if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
-
-                                // TODO when considering detourCost, take the min of costs for insertion at any position
-                                // instead of simply insertion to the end of current trip!
-
-                                // Old "absolute" detourCost
-                                double detourCost = dist[currId][candidateId] + dist[candidateId][1] - dist[currId][1];
-
-                                // New detourCost defined as dist from most recent: works better!!
-                                detourCost = dist[currId][candidateId];
-
-                                // Experimental: min of costs for insertion at any position
-                                for (int oldMember : selectedIds) {
-                                    detourCost = Math.min(detourCost, dist[oldMember][candidateId]);
-                                }
-
-
-
-                                if (detourCost <= acceptableDetourCost && detourCost < bestCandidateDetourCost) {
-                                    bestCandidateDetourCost = detourCost;
-                                    bestCandidateIndex = candidateIndex;
-                                }
-
-                                // Old "relative comparison" of detourCost
-                                //if (detourCost <= 0.02 * (dist[currId][1] + dist[1][candidateId])) {
-
-//                                if (detourCost <= acceptableDetourCost) {
-//                                    bestCandidateIndex = candidateIndex;
-//                                    bestCandidateDetourCost = detourCost;
-//                                    break;
-//                                }
-                            }
-                        }
-                        if (bestCandidateIndex < 0) break; // No more acceptable detours available
-
-                        // Add best candidate detour to current route
-                        int candidateId = todo.get(bestCandidateIndex);
-                        used[candidateId] = true;
-                        currWeightSum += w[candidateId];
-                        selectedIds.add(candidateId);
-                        selectedIndicesForRemoval.add(bestCandidateIndex);
-                        currId = candidateId;
-                    }
-
-                    utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
-                }
-
-                localWalkImprovementsToTrip(selectedIds);
-
-                // Save trip destination and meters
-                String ansLine = "";
-                int trip = 0;
-                int prevId = 1;
-                for (int id : selectedIds) {
-                    ansLine += id +"; ";
-                    trip += dist[prevId][id];
-                    prevId = id;
-                }
-                trip += dist[prevId][1];
-                meters += trip;
-                ansLine = ansLine.substring(0, ansLine.length()-2);
-                ans.add(ansLine);
-                double utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
-                System.out.println(
-                        "Trip #" + ans.size() +
-                        " overall " + Math.round(trip/1000) + "km, " +
-                        "target " + Math.round(targetDistX2/2000) + "km, " +
-                        "detours " + Math.round((trip-targetDistX2)/1000) + "km, " +
-                        selectedIds.size() + " stops, " +
-                        "utz " + utz +
-                        ", acceptableDetourCost " + acceptableDetourCost
-                );
-
-                // Remove selected
-                Collections.sort(selectedIndicesForRemoval, Collections.reverseOrder());
-                for (int index : selectedIndicesForRemoval) {
-                    todo.remove(index);
-                }
+            // Create trips until route is complete
+            while (!candidates.isEmpty()) {
+                createTrip();
             }
+
             System.out.println("Solution value " + formatAnsValue(meters));
             writeAnsToFile(ans);
         }
 
+        void createTrip() {
+            // These will be filled
+            List<Integer> selectedIds = null;
+            List<Integer> selectedIndicesForRemoval = null;
+            int currWeightSum = 0;
+            double targetDistX2 = 0;
+
+            // Increase acceptable detour cost until utz >= 0.98 (recreate trip after each increase)
+            int acceptableDetourCost = 500;
+            for (double utz=0; utz<0.98 && acceptableDetourCost<5000000; acceptableDetourCost *= 1.10) {
+
+                boolean[] used = new boolean[endId];
+
+                // Lock down the furthest target
+                int currId = candidates.get(candidates.size()-1);
+                used[currId] = true;
+                selectedIds = new ArrayList<>();
+                selectedIndicesForRemoval = new ArrayList<>();
+                selectedIds.add(currId);
+                selectedIndicesForRemoval.add(candidates.size()-1);
+                currWeightSum = w[currId];
+
+                targetDistX2 = 2 * dist[1][currId];
+
+                // TODO detours on the way to target as well!
+                // TODO make threshold expand on the way up and shrink on the way down
+                // TODO add special consideration for collecting "problem children"
+
+                while (true) {
+
+                    // Choose best candidate detour
+                    int bestCandidateIndex = -1;
+                    double bestCandidateDetourCost = Double.POSITIVE_INFINITY;
+                    for (int candidateIndex=candidates.size()-2; candidateIndex>=0; candidateIndex--) {
+                        int candidateId = candidates.get(candidateIndex);
+                        if (used[candidateId]) continue;
+                        if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+
+                            // New definition: Min of dists to any previous stop within trip
+                            double detourCost = Double.POSITIVE_INFINITY;
+                            for (int id : selectedIds) {
+                                detourCost = Math.min(detourCost, dist[id][candidateId]);
+                            }
+
+                            if (detourCost <= acceptableDetourCost && detourCost < bestCandidateDetourCost) {
+                                bestCandidateDetourCost = detourCost;
+                                bestCandidateIndex = candidateIndex;
+                            }
+                        }
+                    }
+                    if (bestCandidateIndex < 0) break; // No more acceptable detours available
+
+                    // Add best candidate detour to current route
+                    int candidateId = candidates.get(bestCandidateIndex);
+                    used[candidateId] = true;
+                    currWeightSum += w[candidateId];
+                    selectedIds.add(candidateId);
+                    selectedIndicesForRemoval.add(bestCandidateIndex);
+                    currId = candidateId;
+                }
+
+                utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
+            }
+
+            localWalkImprovementsToTrip(selectedIds);
+
+            // Save trip destination and meters
+            String ansLine = "";
+            int trip = 0;
+            int prevId = 1;
+            for (int id : selectedIds) {
+                ansLine += id +"; ";
+                trip += dist[prevId][id];
+                prevId = id;
+            }
+            trip += dist[prevId][1];
+            meters += trip;
+            ansLine = ansLine.substring(0, ansLine.length()-2);
+            ans.add(ansLine);
+
+            // Print statistics
+            double utz = Math.round(100 * currWeightSum / MAX_WEIGHT) / 100.0;
+            System.out.println(
+                    "Trip #" + ans.size() +
+                            " overall " + Math.round(trip/1000) + "km, " +
+                            "target " + Math.round(targetDistX2/2000) + "km, " +
+                            "detours " + Math.round((trip-targetDistX2)/1000) + "km, " +
+                            selectedIds.size() + " stops, " +
+                            "utz " + utz +
+                            ", acceptableDetourCost " + Math.round(acceptableDetourCost/1000) + "km "
+            );
+
+            // Remove selected from candidates
+            Collections.sort(selectedIndicesForRemoval, Collections.reverseOrder()); // Need to delete in reverse order
+            for (int index : selectedIndicesForRemoval) {
+                candidates.remove(index);
+            }
+        }
+
+        // Given a list of ids representing current trip in order (excluding home destination),
+        // this method will local walk the order to a local optima (and modify the input list accordingly).
         void localWalkImprovementsToTrip(List<Integer> order) {
             int n = order.size();
             int curr = 0;
