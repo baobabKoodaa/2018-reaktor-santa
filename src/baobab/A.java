@@ -27,25 +27,40 @@ public class A {
 
         /****************************** START READING HERE ********************************/
 
-        double randomSize = 0.2;//0.58;
+
+        // Hyperparameters
+        double randomSize = 0.58; // At one point this was local walked to here
+        double sparsityMultiplier = 1.1; // Optimal between 1.0 - 1.1
+        double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
+        double UTZ_TRIP_GOAL = 0.98; // TODO should this be higher now?
+
 
         void solve() throws Exception {
             readInput();
             preCalcAllDistances();
-            // TODO chart out loneliest nodes according to "radius of neighbors needed to cover MAX_WEIGHT"
+            // TODO chart out loneliest nodes according to "radius of neighbors needed to cover MAX_TRIP_WEIGHT"
             // These nodes either need to be the target of a flyover, or we need to flyover other nodes as we go to them
             // Do we need a separate "flyover on the way" routine for these lonely nodes or are we good with what we have?
             // NO WAIT! WE NEED TO START TARGETING LONELIEST NODES BEFORE WE TARGET FURTHEST NODES!
 
-            route();
-            //loadPreviouslyFoundSolution("santamap325");
+            int actionType = 3;
+
+            if (actionType == 1) loadAndComparePreviousSolutions();
+            else if (actionType == 2) route();
+            else {
+                while (true) {
+                    route();
+                }
+            }
+
         }
 
-        int MAX_WEIGHT = 10000000;
+        int MAX_TRIP_WEIGHT = 10000000;
 
         int endId;
         double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
         int[] w;
+        int sumOfAllWeights;
         double[][] dist;
 
         void readInput() throws FileNotFoundException {
@@ -64,6 +79,7 @@ public class A {
             // Read file to memory
             c = new double[endId][2];
             w = new int[endId];
+            sumOfAllWeights = 0;
             scanner = new Scanner(new File("input.txt"));
             while (scanner.hasNext()) {
                 String[] line = scanner.nextLine().split(";");
@@ -74,6 +90,7 @@ public class A {
                 c[id][0] = c1;
                 c[id][1] = c2;
                 w[id] = weight;
+                sumOfAllWeights += weight;
                 //System.out.println(id + ";" + c1 + ";" + c2 + ";" + weight);
             }
 
@@ -84,8 +101,24 @@ public class A {
             scanner.close();
         }
 
-        void loadPreviouslyFoundSolution(String fileName) throws FileNotFoundException {
-            System.out.println("Loading " + fileName + "...");
+        void loadAndComparePreviousSolutions() {
+            int bestI = 0;
+            double bestVal = Double.POSITIVE_INFINITY;
+            try {
+                for (int i=100 ;; i++) {
+                    double val = loadPreviouslyFoundSolution("santamap" + i);
+                    if (val < bestVal) {
+                        bestVal = val;
+                        bestI = i;
+                    }
+                }
+            } catch (Exception ex) {
+                System.out.println("Best solution i="+bestI+" val=" + formatAnsValue(bestVal));
+            }
+        }
+
+        double loadPreviouslyFoundSolution(String fileName) throws FileNotFoundException {
+            System.out.print("Loading " + fileName + "... ");
             trips = new ArrayList<>();
             String pathName = "outputs" + File.separator + fileName + ".txt";
             File f = new File(pathName);
@@ -101,7 +134,9 @@ public class A {
                 }
                 trips.add(trip);
             }
-            System.out.println("Solution value " + formatAnsValue(getRouteMeters(trips)));
+            double val = getRouteMeters(trips);
+            System.out.println("Solution value " + formatAnsValue(val));
+            return val;
         }
 
         void preCalcAllDistances() throws Exception {
@@ -135,15 +170,17 @@ public class A {
             return R * c;
         }
 
-        double meters = 0;
+        double routeMeters = 0;
         List<List<Integer>> trips;
         List<Integer> candidates;
+        int weightRemaining;
 
         void route() {
             System.out.println("Routing...");
+            weightRemaining = sumOfAllWeights;
 
             // These will be filled
-            meters = 0;
+            routeMeters = 0;
             trips = new ArrayList<>();
             candidates = new ArrayList<>();
 
@@ -153,10 +190,11 @@ public class A {
             Collections.sort(sortHelper);
             for (IDval pair : sortHelper) candidates.add(pair.id);
 
-            // Create trips until route is complete
+            // Create trips
             while (!candidates.isEmpty()) {
                 createTrip();
             }
+
 
             writeAnsToFile(trips);
 
@@ -167,55 +205,123 @@ public class A {
 
         List<Integer> currTrip;
         List<Integer> indicesForCurrTrip;
-        int currWeightSum;
+        int currTripWeight;
         double targetDist;
-        int acceptableClusterSparsity;
         boolean[] used;
 
-        double UTZ_GOAL = 0.98;
+        double getSmallestPossibleClusterSparsity() {
+            double min = 0;
+            double max = 10000000.0;
+            if (possibleToQuicklyFillClusterOfSize(300000)) max = 299999; // minor speedup
+            else min = 300000;
+            while (min+5 < max) {
+                double mid = min+(max-min)/2;
+                if (possibleToQuicklyFillClusterOfSize(mid)) {
+                    max = mid;
+                } else {
+                    min = mid+5;
+                }
+            }
+            return min+5;
+        }
+
+        // This method intentionally overfills (due to use case where this is used to set a lower bound)
+        boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
+
+            // Reinitialize needed globals
+            used = new boolean[endId];
+            currTrip = new ArrayList<>();
+            currTripWeight = 0;
+
+            // Lock down the furthest target
+            int currId = candidates.get(candidates.size()-1);
+            used[currId] = true;
+            currTrip.add(currId);
+            currTripWeight += w[currId];
+
+            double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
+            while (true) {
+                boolean change = false;
+                for (int candidate : candidates) {
+                    if (used[candidate]) continue;
+
+                    // Is candidate within maxSparsity?
+                    double sparsity = Double.POSITIVE_INFINITY;
+                    for (int id : currTrip) {
+                        sparsity = Math.min(sparsity, dist[id][candidate]);
+                    }
+                    if (sparsity > maxSparsity) continue;
+
+                    // Add candidate to cluster
+                    used[candidate] = true;
+                    currTrip.add(candidate);
+                    currTripWeight += w[candidate];
+                    if (currTripWeight >= goal) return true;
+                    change = true;
+                }
+                if (!change) return false;
+            }
+        }
 
         void createTrip() {
+            // A trip consists of a cluster, and detours on the way to/from cluster.
+            // We want this trip to have high utz with minimal cluster sparsity and minimal detours.
+            // First, binary search a lower bound for cluster sparsity. Use 1.1 * that sparsity (to allow more room for random).
+            // Try many different (greedy, slightly randomized) ways of creating a trip.
+            // Out of these trip options, greedily choose the one with lowest meters.
+
+            double sparsityMin = getSmallestPossibleClusterSparsity();
+
             // These will be filled
             currTrip = null;
             indicesForCurrTrip = null;
-            currWeightSum = 0;
+            currTripWeight = 0;
             targetDist = 0;
+            used = new boolean[endId];
 
-            // High-level idea: we want this trip to have high utz with minimal cluster sparsity and minimal detours.
-            // Implementation: recreate trip until utz >= goal. Each recreation has ...
-            for (acceptableClusterSparsity = 50; utz()<UTZ_GOAL; acceptableClusterSparsity *= 1.05) {//TODO palauta 1.02) {
-                if (acceptableClusterSparsity > 10000000) break; // special break condition sometimes needed to complete LAST trip
+            // these variables will hold the best trip we find
+            double bestTripMeters = Double.POSITIVE_INFINITY;
+            boolean[] bestUsed = null;
+            List<Integer> bestSelectedIds = null;
+            List<Integer> bestSelectedIndicesForRemoval = null;
+            int bestCurrWeightSum = 0;
 
-                // use random effect to create similar trip many times, choose best of these
-                double bestTripMeters = Double.POSITIVE_INFINITY;
-                boolean[] bestUsed = null;
-                List<Integer> bestSelectedIds = null;
-                List<Integer> bestSelectedIndicesForRemoval = null;
-                int bestCurrWeightSum = 0;
-
-                for (int tripOption=1; tripOption<=50; tripOption++) {
-
+            // Create several (greedy, slightly randomized) trips
+            double sparsity = sparsityMultiplier * sparsityMin;
+            for (;; sparsity *= 1.04) { // Usually only 1 iteration. In rare cases the initial sparsity is not enough (because we allowed overfill when calculating lower bound for sparsity)
+                for (int tripOption=1; tripOption<=10; tripOption++) {
 
                     // Reinitialize globals
                     used = new boolean[endId];
                     currTrip = new ArrayList<>();
                     indicesForCurrTrip = new ArrayList<>();
-                    currWeightSum = 0;
+                    currTripWeight = 0;
 
                     // Lock down the furthest target
                     int currId = candidates.get(candidates.size()-1);
                     used[currId] = true;
                     currTrip.add(currId);
                     indicesForCurrTrip.add(candidates.size()-1);
-                    currWeightSum += w[currId];
+                    currTripWeight += w[currId];
                     targetDist = dist[1][currId];
 
                     // TODO add special consideration for collecting "problem children"
 
-                    // collect cluster up to 0.9 utz and then zigzag to/from
-                    collectClusterAroundTarget();
+                    // collect cluster (at least) up to UTZ_CLUSTER_GOAL and then zigzag to/from cluster to fill remaining capacity.
+                    collectClusterAroundTarget(sparsity);
 
-                    if (utz() < 0.9) {
+                    if (currTripWeight == weightRemaining) {
+                        // Special case to fix last trip which may have low UTZ
+                        localWalkImprovementsToTrip(currTrip);
+                        bestTripMeters = getTripMeters(currTrip);
+                        bestUsed = used;
+                        bestSelectedIds = currTrip;
+                        bestSelectedIndicesForRemoval = indicesForCurrTrip;
+                        bestCurrWeightSum = currTripWeight;
+                        break;
+                    }
+
+                    if (utz() < UTZ_CLUSTER_GOAL) {
                         if (tripOption < 2) break; // to speedup
                         continue;
                     }
@@ -227,12 +333,12 @@ public class A {
                         int firstEntry = currTrip.get(0);
                         int lastEntry = currTrip.get(currTrip.size()-1);
 
-                        collectZigZags(firstEntry);
-                        collectZigZags(lastEntry);
+                        collectZigZags(firstEntry, sparsity);
+                        collectZigZags(lastEntry, sparsity);
                     }
 
                     // Is this best tripOption for current target?
-                    if (utz() >= UTZ_GOAL) {
+                    if (utz() >= UTZ_TRIP_GOAL) {
                         localWalkImprovementsToTrip(currTrip);
                         double tripMeters = getTripMeters(currTrip);
                         if (tripMeters < bestTripMeters) {
@@ -240,36 +346,41 @@ public class A {
                             bestUsed = used;
                             bestSelectedIds = currTrip;
                             bestSelectedIndicesForRemoval = indicesForCurrTrip;
-                            bestCurrWeightSum = currWeightSum;
+                            bestCurrWeightSum = currTripWeight;
                         }
                     }
 
                 }
 
                 if (bestSelectedIds != null) {
-                    // We have found at least one trip with this cluster sparsity
+                    // Set the "best" trip option as the "current" trip.
                     used = bestUsed;
                     currTrip = bestSelectedIds;
                     indicesForCurrTrip = bestSelectedIndicesForRemoval;
-                    currWeightSum = bestCurrWeightSum;
+                    currTripWeight = bestCurrWeightSum;
+                    break;
                 }
-
-
             }
 
-            meters += getTripMeters(currTrip);
+            // Add current trip to route.
+            double tripMeters = getTripMeters(currTrip);
+            routeMeters += tripMeters;
             trips.add(currTrip);
+            weightRemaining -= currTripWeight;
 
-            // Print statistics
-//            System.out.println(
-//                    "Trip #" + ans.size() +
-//                            " overall " + Math.round(trip/1000) + "km, " +
-//                            "target " + Math.round(targetDist/1000) + "km, " +
-//                            "detours " + Math.round((trip-2*targetDist)/1000) + "km, " +
-//                            selectedIds.size() + " stops, " +
-//                            "utz " + utz() +
-//                            ", acceptableClusterSparsity " + Math.round(acceptableClusterSparsity/1000) + "km "
-//            );
+            // Print statistics of this trip
+            if (false) {
+                System.out.println(
+                        "Trip #" + trips.size() +
+                                " overall " + Math.round(tripMeters / 1000) + "km, " +
+                                "target " + Math.round(targetDist / 1000) + "km, " +
+                                "detours " + Math.round((tripMeters - 2 * targetDist) / 1000) + "km, " +
+                                currTrip.size() + " stops, " +
+                                "utz " + utz() +
+                                ", acceptableClusterSparsity " + Math.round(sparsity / 1000) + "km " +
+                                "(min bound " + Math.round(sparsityMin / 1000) + "km)"
+                );
+            }
 
             // Remove selected from candidates
             Collections.sort(indicesForCurrTrip, Collections.reverseOrder()); // Need to delete in reverse order
@@ -298,50 +409,45 @@ public class A {
         }
 
         double utz() {
-            return 1.0 * currWeightSum / MAX_WEIGHT;
+            return 1.0 * currTripWeight / MAX_TRIP_WEIGHT;
         }
 
         Random rng = new Random();
 
-        void collectClusterAroundTarget() {
+        void collectClusterAroundTarget(double maxSparsity) {
             while (true) {
                 int bestIndex = -1;
                 double bestHeuristicVal = Double.POSITIVE_INFINITY;
                 for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
                     int candidateId = candidates.get(candidateIndex);
 
-                    // Is candidate already used within this or another trip
+                    // Is candidate already used within this trip?
                     if (used[candidateId]) continue;
 
                     // Does candidate fit within weight bounds?
-                    if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+                    if (currTripWeight + w[candidateId] <= MAX_TRIP_WEIGHT) {
 
                         // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
                         double sparsity = Double.POSITIVE_INFINITY;
                         for (int id : currTrip) {
                             sparsity = Math.min(sparsity, dist[id][candidateId]);
-                            // TODO Heuristic experiment: as we cluster, we should slightly favor nodes closer to home
-                            // TODO try dist[id][candidateId] * targetDist / Math.pow(dist[candidateId][1], 1.3);
-                            // TODO more exact tradeoff between detour vs. "catching far nodes now that we are afar"
                         }
-                        if (sparsity > acceptableClusterSparsity) continue;
+                        if (sparsity > maxSparsity) continue;
 
                         // Calculate heuristic value for candidate
                         double heuristicVal = sparsity;
 
                         // Add random to heuristic in order to explore many different options for this trip as this function is called many times
-                        if (currWeightSum + w[candidateId] < UTZ_GOAL * MAX_WEIGHT) {
+                        if (currTripWeight + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
+                            // Add random unless we are able to "complete" a trip with this stop
                             heuristicVal *= (1 + randomSize*rng.nextDouble());
-                        } else {
-                            // TODO try changing heuristicVal here as well
-                            // If we are able to "complete" a trip with this stop, we don't want to add random to it
                         }
 
                         // TODO more advanced heuristic which gives some consideration to WEIGHT
                         // as well as possibly other factors, such as problem-childness-from-previous rounds or number
                         // of close neighbors still available as candidates
 
-                        if (sparsity <= acceptableClusterSparsity && heuristicVal < bestHeuristicVal) {
+                        if (sparsity <= maxSparsity && heuristicVal < bestHeuristicVal) {
                             bestHeuristicVal = heuristicVal;
                             bestIndex = candidateIndex;
                         }
@@ -352,22 +458,23 @@ public class A {
                 // Add closest node to cluster
                 int candidateId = candidates.get(bestIndex);
                 used[candidateId] = true;
-                currWeightSum += w[candidateId];
+                currTripWeight += w[candidateId];
                 currTrip.add(candidateId);
                 indicesForCurrTrip.add(bestIndex);
             }
         }
 
-        void collectZigZags(int nodeClosestToHome) {
+        // TODO rewrite zigzag collection entirely; do both up and down at the same time?
+        void collectZigZags(int nodeClosestToHome, double sparsity) {
             // TODO make threshold expand on the way up and shrink on the way down
             for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
                 int candidateId = candidates.get(candidateIndex);
                 if (used[candidateId]) continue;
-                if (currWeightSum + w[candidateId] <= MAX_WEIGHT) {
+                if (currTripWeight + w[candidateId] <= MAX_TRIP_WEIGHT) {
                     double detourCost = dist[nodeClosestToHome][candidateId] + dist[candidateId][1] - dist[nodeClosestToHome][1];
-                    if (detourCost <= 0.01 * acceptableClusterSparsity) {
+                    if (detourCost <= 0.01 * sparsity) { // 0.01-0.03 range is ok
                         used[candidateId] = true;
-                        currWeightSum += w[candidateId];
+                        currTripWeight += w[candidateId];
                         currTrip.add(candidateId);
                         indicesForCurrTrip.add(candidateIndex);
                         nodeClosestToHome = candidateId;
