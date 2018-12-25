@@ -37,11 +37,7 @@ public class A {
             // Do we need a separate "flyover on the way" routine for these lonely nodes or are we good with what we have?
             // NO WAIT! WE NEED TO START TARGETING LONELIEST NODES BEFORE WE TARGET FURTHEST NODES!
 
-            while (true) {
-                route();
-                System.out.println("random size used was " + randomSize);
-                randomSize *= 1.10;
-            }
+            route();
             //loadPreviouslyFoundSolution("santamap325");
         }
 
@@ -216,19 +212,24 @@ public class A {
 
                     // TODO add special consideration for collecting "problem children"
 
+                    // collect cluster up to 0.9 utz and then zigzag to/from
                     collectClusterAroundTarget();
 
-                    // TODO collect cluster up to 0.9 utz and then zigzag to/from
+                    if (utz() < 0.9) {
+                        if (tripOption < 2) break; // to speedup
+                        continue;
+                    }
 
-                    if (tripOption < 2 && utz() < UTZ_GOAL) break; // mainly for speedup purpose
+                    // Zig zags on the way
+                    if (true) {
+                        // Find first/last entry in order to discover detours to/from cluster
+                        localWalkImprovementsToTrip(currTrip);
+                        int firstEntry = currTrip.get(0);
+                        int lastEntry = currTrip.get(currTrip.size()-1);
 
-                    // Find first/last entry in order to discover detours to/from cluster
-//                localWalkImprovementsToTrip(selectedIds);
-//                int firstEntry = selectedIds.get(0);
-//                int lastEntry = selectedIds.get(selectedIds.size()-1);
-//
-//                collectZigZags(firstEntry);
-//                collectZigZags(lastEntry);
+                        collectZigZags(firstEntry);
+                        collectZigZags(lastEntry);
+                    }
 
                     // Is this best tripOption for current target?
                     if (utz() >= UTZ_GOAL) {
@@ -346,7 +347,7 @@ public class A {
                         }
                     }
                 }
-                if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight and/or max acceptable sparsity)
+                if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight/sparsity)
 
                 // Add closest node to cluster
                 int candidateId = candidates.get(bestIndex);
