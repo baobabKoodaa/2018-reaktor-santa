@@ -29,10 +29,12 @@ public class A {
 
 
         // Hyperparameters
-        double randomSize = 0.58; // At one point this was local walked to here
-        double sparsityMultiplier = 1.1; // Optimal between 1.0 - 1.1
+        double randomSize = 0.58; // At one point this was local walked to here (TODO again)
+        double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
-        double UTZ_TRIP_GOAL = 0.98; // TODO should this be higher now?
+        double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
+
+        boolean verbose = true;
 
 
         void solve() throws Exception {
@@ -60,7 +62,7 @@ public class A {
         int endId;
         double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
         int[] w;
-        int sumOfAllWeights;
+        long sumOfAllWeights;
         double[][] dist;
 
         void readInput() throws FileNotFoundException {
@@ -98,45 +100,71 @@ public class A {
             c[1][0] = 68.073611;
             c[1][1] = 29.315278;
 
+            readChallengingNodes();
+
             scanner.close();
+        }
+
+        Set<Integer> challengingNodes = new HashSet<>();
+
+        void readChallengingNodes() throws FileNotFoundException {
+            System.out.println("Reading challenging nodes...");
+            challengingNodes = new HashSet<>();
+            Scanner scanner = new Scanner(new File("challenging_nodes.txt"));
+            while (scanner.hasNext()) {
+                String line = scanner.nextLine();
+                String[] sep = line.split(" ");
+                try {
+                    int id = Integer.parseInt(sep[sep.length-1]);
+                    int tripNum = Integer.parseInt(sep[1].substring(1));
+                    if (tripNum < 500) challengingNodes.add(id);
+                } catch (Exception ex) {
+                    System.out.println("    Skipping row " + line);
+                }
+
+            }
         }
 
         void loadAndComparePreviousSolutions() {
             int bestI = 0;
             double bestVal = Double.POSITIVE_INFINITY;
-            try {
-                for (int i=100 ;; i++) {
-                    double val = loadPreviouslyFoundSolution("santamap" + i);
-                    if (val < bestVal) {
-                        bestVal = val;
-                        bestI = i;
-                    }
+            for (int i=1 ;; i++) {
+                String filePath = "outputs" + File.separator + "santamap" + i + ".txt";
+                File file = new File(filePath);
+                if (!file.exists()) break;
+                Double val = loadPreviouslyFoundSolution(filePath);
+                if (val != null && val < bestVal) {
+                    bestVal = val;
+                    bestI = i;
                 }
-            } catch (Exception ex) {
-                System.out.println("Best solution i="+bestI+" val=" + formatAnsValue(bestVal));
             }
+            System.out.println("Best solution i="+bestI+" val=" + formatAnsValue(bestVal));
         }
 
-        double loadPreviouslyFoundSolution(String fileName) throws FileNotFoundException {
-            System.out.print("Loading " + fileName + "... ");
-            trips = new ArrayList<>();
-            String pathName = "outputs" + File.separator + fileName + ".txt";
-            File f = new File(pathName);
-            if (!f.exists()) throw new RuntimeException("File doesn't exist: " + pathName);
-            Scanner scanner = new Scanner(f);
-            while (scanner.hasNext()) {
-                String[] line = scanner.nextLine().split(";");
-                List<Integer> trip = new ArrayList<>();
-                for (int i=0; i<line.length; i++) {
-                    String element = line[i].replace(" ", "");
-                    int id = Integer.parseInt(element);
-                    trip.add(id);
+        Double loadPreviouslyFoundSolution(String filePath) {
+            try {
+                System.out.print("Loading " + filePath + "... ");
+                trips = new ArrayList<>();
+                File f = new File(filePath);
+                if (!f.exists()) throw new RuntimeException("File doesn't exist: " + filePath);
+                Scanner scanner = new Scanner(f);
+                while (scanner.hasNext()) {
+                    String[] line = scanner.nextLine().split(";");
+                    List<Integer> trip = new ArrayList<>();
+                    for (int i = 0; i < line.length; i++) {
+                        String element = line[i].replace(" ", "");
+                        int id = Integer.parseInt(element);
+                        trip.add(id);
+                    }
+                    trips.add(trip);
                 }
-                trips.add(trip);
+                double val = getRouteMeters(trips);
+                System.out.println("Solution value " + formatAnsValue(val));
+                return val;
+            } catch (Exception ex) {
+                System.out.println("Exception: " + ex.toString());
+                return null;
             }
-            double val = getRouteMeters(trips);
-            System.out.println("Solution value " + formatAnsValue(val));
-            return val;
         }
 
         void preCalcAllDistances() throws Exception {
@@ -170,13 +198,35 @@ public class A {
             return R * c;
         }
 
+        double[] getLoneliness() {
+            double[] loneliness = new double[endId];
+            for (int id=2; id<endId; id++) {
+                // Sort everyone according to dist to id
+                List<IDval> neighbors = new ArrayList<>();
+                for (int neighbor=2; neighbor<endId; neighbor++) {
+                    if (neighbor==id) continue;
+                    neighbors.add(new IDval(neighbor, dist[id][neighbor]));
+                }
+                Collections.sort(neighbors);
+
+                // Loneliness of node == radius needed to cluster this node so that sum of weight >= MAX_TRIP_WEIGHT
+                int i = 0;
+                for (int sumOfWeight=0; sumOfWeight < MAX_TRIP_WEIGHT; i++) {
+                    sumOfWeight += neighbors.get(i).val;
+                }
+                int furthestNeighborInCluster = neighbors.get(i).id;
+                loneliness[id] = dist[id][furthestNeighborInCluster];
+            }
+            return loneliness;
+        }
+
         double routeMeters = 0;
         List<List<Integer>> trips;
         List<Integer> candidates;
-        int weightRemaining;
+        long weightRemaining;
 
         void route() {
-            System.out.println("Routing...");
+            System.out.print("Routing... ");
             weightRemaining = sumOfAllWeights;
 
             // These will be filled
@@ -184,11 +234,24 @@ public class A {
             trips = new ArrayList<>();
             candidates = new ArrayList<>();
 
-            // Order candidates based on distance from Santa // TODO try more advanced heuristic here as well
+            // Order candidates mainly based on distance from Santa
+            double[] loneliness = getLoneliness();
             List<IDval> sortHelper = new ArrayList<>();
-            for (int id=2; id<endId; id++) sortHelper.add(new IDval(id, (long)dist[1][id]));
+            for (int id=2; id<endId; id++) {
+                // Experimenting with more advanced heuristic here
+                double heuristicVal = dist[1][id];
+
+                // Previously discovered challenging nodes should be given priority
+                if (challengingNodes.contains(id)) heuristicVal += 100000L; // TODO remove me, im making results slightly worse
+                if (loneliness[id] > 1000000) heuristicVal += 100000000;  // TODO remove me, im making results slightly worse
+
+                sortHelper.add(new IDval(id, heuristicVal));
+                //Used to be: sortHelper.add(new IDval(id, (long)dist[1][id]));
+            }
             Collections.sort(sortHelper);
-            for (IDval pair : sortHelper) candidates.add(pair.id);
+            for (IDval pair : sortHelper) {
+                candidates.add(pair.id);
+            }
 
             // Create trips
             while (!candidates.isEmpty()) {
@@ -205,7 +268,7 @@ public class A {
 
         List<Integer> currTrip;
         List<Integer> indicesForCurrTrip;
-        int currTripWeight;
+        long currTripWeight;
         double targetDist;
         boolean[] used;
 
@@ -276,18 +339,21 @@ public class A {
             currTrip = null;
             indicesForCurrTrip = null;
             currTripWeight = 0;
-            targetDist = 0;
             used = new boolean[endId];
+
+            // Where to build cluster
+            int clusterTarget = candidates.get(candidates.size()-1);
+            targetDist = dist[1][clusterTarget];
 
             // these variables will hold the best trip we find
             double bestTripMeters = Double.POSITIVE_INFINITY;
             boolean[] bestUsed = null;
             List<Integer> bestSelectedIds = null;
             List<Integer> bestSelectedIndicesForRemoval = null;
-            int bestCurrWeightSum = 0;
+            long bestCurrWeightSum = 0;
 
-            // Create several (greedy, slightly randomized) trips
-            double sparsity = sparsityMultiplier * sparsityMin;
+            // Create several (greedy, slightly randomized) options for trip to target
+            double sparsity = multiplierToSlightlyExpandMaxSparsity * sparsityMin;
             for (;; sparsity *= 1.04) { // Usually only 1 iteration. In rare cases the initial sparsity is not enough (because we allowed overfill when calculating lower bound for sparsity)
                 for (int tripOption=1; tripOption<=10; tripOption++) {
 
@@ -298,14 +364,10 @@ public class A {
                     currTripWeight = 0;
 
                     // Lock down the furthest target
-                    int currId = candidates.get(candidates.size()-1);
-                    used[currId] = true;
-                    currTrip.add(currId);
+                    used[clusterTarget] = true;
+                    currTrip.add(clusterTarget);
                     indicesForCurrTrip.add(candidates.size()-1);
-                    currTripWeight += w[currId];
-                    targetDist = dist[1][currId];
-
-                    // TODO add special consideration for collecting "problem children"
+                    currTripWeight += w[clusterTarget];
 
                     // collect cluster (at least) up to UTZ_CLUSTER_GOAL and then zigzag to/from cluster to fill remaining capacity.
                     collectClusterAroundTarget(sparsity);
@@ -328,13 +390,12 @@ public class A {
 
                     // Zig zags on the way
                     if (true) {
+                        // TODO make sure zigzag is always able to complete the route
                         // Find first/last entry in order to discover detours to/from cluster
                         localWalkImprovementsToTrip(currTrip);
                         int firstEntry = currTrip.get(0);
                         int lastEntry = currTrip.get(currTrip.size()-1);
-
-                        collectZigZags(firstEntry, sparsity);
-                        collectZigZags(lastEntry, sparsity);
+                        collectZigZags(firstEntry, lastEntry, sparsity);
                     }
 
                     // Is this best tripOption for current target?
@@ -369,7 +430,7 @@ public class A {
             weightRemaining -= currTripWeight;
 
             // Print statistics of this trip
-            if (false) {
+            if (verbose) {
                 System.out.println(
                         "Trip #" + trips.size() +
                                 " overall " + Math.round(tripMeters / 1000) + "km, " +
@@ -378,15 +439,22 @@ public class A {
                                 currTrip.size() + " stops, " +
                                 "utz " + utz() +
                                 ", acceptableClusterSparsity " + Math.round(sparsity / 1000) + "km " +
-                                "(min bound " + Math.round(sparsityMin / 1000) + "km)"
+                                "(min bound " + Math.round(sparsityMin / 1000) + "km) " +
+                                "trip target " + clusterTarget
                 );
             }
 
             // Remove selected from candidates
             Collections.sort(indicesForCurrTrip, Collections.reverseOrder()); // Need to delete in reverse order
+            int temp = 0;
             for (int index : indicesForCurrTrip) {
+                temp += w[candidates.get(index)];
                 candidates.remove(index);
             }
+            if (temp != currTripWeight) {
+                System.out.println("Mismatch! temp="+temp+", currTripWeight="+currTripWeight);
+            }
+            if (weightRemaining < 0) System.out.println("Weight remaining: " + weightRemaining);
         }
 
         double getTripMeters(List<Integer> trip) {
@@ -464,20 +532,37 @@ public class A {
             }
         }
 
-        // TODO rewrite zigzag collection entirely; do both up and down at the same time?
-        void collectZigZags(int nodeClosestToHome, double sparsity) {
-            // TODO make threshold expand on the way up and shrink on the way down
+        // Add detours on the way to/from cluster.
+        // Iterate candidates in order of furthest to closest.
+        // If a candidate fits on the trip and the detour isn't too much, then we include it.
+        // We always choose greedily whether we want to add to the beginning or end of our trip.
+        void collectZigZags(int closest1, int closest2, double sparsity) {
             for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
                 int candidateId = candidates.get(candidateIndex);
                 if (used[candidateId]) continue;
                 if (currTripWeight + w[candidateId] <= MAX_TRIP_WEIGHT) {
-                    double detourCost = dist[nodeClosestToHome][candidateId] + dist[candidateId][1] - dist[nodeClosestToHome][1];
-                    if (detourCost <= 0.01 * sparsity) { // 0.01-0.03 range is ok
+                    double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
+                    double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
+                    double detourCost = Math.min(detourCost1, detourCost2);
+
+                    // Old way of doing it
+                    //if (detourCost > 0.01 * sparsity) continue; // 0.01-0.03 range is ok
+
+                    // TODO make threshold expand on the way up and shrink on the way down (dont do this before charting loneliness of node)
+                    if (detourCost <= 0.01 * sparsity) {
                         used[candidateId] = true;
                         currTripWeight += w[candidateId];
-                        currTrip.add(candidateId);
                         indicesForCurrTrip.add(candidateIndex);
-                        nodeClosestToHome = candidateId;
+                        if (detourCost1 < detourCost2) {
+                            // Case: add to beginning ("on the way to cluster")
+                            closest1 = candidateId;
+                            currTrip.add(0, candidateId);
+                        }
+                        else {
+                            // Case: add to end ("on the way from cluster")
+                            closest2 = candidateId;
+                            currTrip.add(candidateId);
+                        }
                     }
                 }
             }
@@ -615,9 +700,9 @@ public class A {
 
         class IDval implements Comparable<IDval> {
             int id;
-            long val;
+            double val;
 
-            public IDval(int id, long val) {
+            public IDval(int id, double val) {
                 this.val = val;
                 this.id = id;
             }
