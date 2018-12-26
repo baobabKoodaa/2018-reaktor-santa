@@ -27,6 +27,7 @@ public class A {
 
         /****************************** START READING HERE ********************************/
 
+        int MAX_TRIP_WEIGHT = 10000000;
 
         // Hyperparameters
         double randomSize = 0.58; // At one point this was local walked to here (TODO again)
@@ -34,30 +35,370 @@ public class A {
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
         double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
 
-        boolean verbose = true;
-
+        // Debug
+        boolean verbose = false;
 
         void solve() throws Exception {
             readInput();
             preCalcAllDistances();
-            // TODO chart out loneliest nodes according to "radius of neighbors needed to cover MAX_TRIP_WEIGHT"
-            // These nodes either need to be the target of a flyover, or we need to flyover other nodes as we go to them
-            // Do we need a separate "flyover on the way" routine for these lonely nodes or are we good with what we have?
-            // NO WAIT! WE NEED TO START TARGETING LONELIEST NODES BEFORE WE TARGET FURTHEST NODES!
 
             int actionType = 3;
-
             if (actionType == 1) loadAndComparePreviousSolutions();
-            else if (actionType == 2) route();
+            else if (actionType == 2) createRouteFromScratch();
             else {
                 while (true) {
-                    route();
+                    createRouteFromScratch();
                 }
             }
 
         }
 
-        int MAX_TRIP_WEIGHT = 10000000;
+        double routeMeters = 0;
+        List<Trip> trips;
+        List<Integer> candidates;
+        long weightRemaining;
+
+        void createRouteFromScratch() {
+            System.out.print("Creating route from scratch... ");
+            weightRemaining = sumOfAllWeights;
+
+            // These will be filled
+            routeMeters = 0;
+            trips = new ArrayList<>();
+            candidates = new ArrayList<>();
+
+            // Order candidates mainly based on distance from Santa
+            double[] loneliness = getLoneliness();
+            List<IDval> sortHelper = new ArrayList<>();
+            for (int id=2; id<endId; id++) {
+                // Experimenting with more advanced heuristic here
+                double heuristicVal = dist[1][id];
+
+                // Previously discovered challenging nodes should be given priority
+                //if (challengingNodes.contains(id)) heuristicVal += 100000L; // was making results slightly worse
+                //if (loneliness[id] > 1000000) heuristicVal += 100000000;  // was making results slightly worse
+
+                sortHelper.add(new IDval(id, heuristicVal));
+            }
+            Collections.sort(sortHelper);
+            for (IDval pair : sortHelper) {
+                candidates.add(pair.id);
+            }
+
+            // Create trips
+            while (!candidates.isEmpty()) {
+                createTrip();
+            }
+
+
+            writeAnsToFile(trips);
+
+            // TODO
+            // for each trip :
+            //     while utz < 0.96
+            //         try to steal routes from other trips
+
+            // TODO EXPLODE: detach all nodes whose "detour" value exceeds some threshold
+            // maybe do it probabilistically so some random nodes get shuffled at the same time, too
+            // reconstruct by shuffling the list of detached nodes and attaching each (non probabilistically?) to most suitable trip
+            // after that try to local walk for a while again
+
+            // TODO simulated annealing type stuff with complete route
+        }
+
+        double getSmallestPossibleClusterSparsity() {
+            double min = 0;
+            double max = 10000000.0;
+            if (possibleToQuicklyFillClusterOfSize(300000)) max = 299999; // minor speedup
+            else min = 300000;
+            while (min+5 < max) {
+                double mid = min+(max-min)/2;
+                if (possibleToQuicklyFillClusterOfSize(mid)) {
+                    max = mid;
+                } else {
+                    min = mid+5;
+                }
+            }
+            return min+5;
+        }
+
+        // This method intentionally overfills (due to use case where this is used to set a lower bound)
+
+        boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
+
+            currTrip = new Trip();
+
+            // Lock down the furthest target
+            int currId = candidates.get(candidates.size()-1);
+            currTrip.addStop(currId);
+
+            double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
+            while (true) {
+                boolean change = false;
+                for (int candidateId : candidates) {
+                    if (currTrip.used[candidateId]) continue;
+
+                    // Is candidate within maxSparsity?
+                    double sparsity = Double.POSITIVE_INFINITY;
+                    for (int id : currTrip.ids) {
+                        sparsity = Math.min(sparsity, dist[id][candidateId]);
+                    }
+                    if (sparsity > maxSparsity) continue;
+
+                    // Add candidate to cluster
+                    currTrip.addStop(candidateId);
+                    if (currTrip.weightSum >= goal) return true;
+                    change = true;
+                }
+                if (!change) return false;
+            }
+        }
+
+        Trip currTrip;
+        List<Integer> indicesForCurrTrip;
+        double targetDist;
+
+        void createTrip() {
+            // A trip consists of a cluster, and detours on the way to/from cluster.
+            // We want this trip to have high utz with minimal cluster sparsity and minimal detours.
+            // First, binary search a lower bound for cluster sparsity. Use 1.1 * that sparsity (to allow more room for random).
+            // Try many different (greedy, slightly randomized) ways of creating a trip.
+            // Out of these trip options, greedily choose the one with lowest meters.
+
+            double sparsityMin = getSmallestPossibleClusterSparsity();
+
+            // These will be filled
+            currTrip = new Trip();
+            indicesForCurrTrip = null;
+
+            // Where to build cluster
+            int clusterTarget = candidates.get(candidates.size()-1);
+            targetDist = dist[1][clusterTarget];
+
+            // these variables will hold the best trip we find
+            Trip bestTrip = null;
+            List<Integer> bestIndicesForRemoval = null;
+
+            // Create several (greedy, slightly randomized) options for trip to target
+            double sparsity = multiplierToSlightlyExpandMaxSparsity * sparsityMin;
+            for (; bestTrip == null; sparsity *= 1.04) { // Usually only 1 iteration. In rare cases the initial sparsity is not enough (because we allowed overfill when calculating lower bound for sparsity)
+                double detourModifier = 0.01;
+                for (int tripOption=1; tripOption<=50; tripOption++) {
+
+                    currTrip = new Trip();
+                    indicesForCurrTrip = new ArrayList<>();
+
+                    // Lock down the furthest target
+                    currTrip.used[clusterTarget] = true;
+                    currTrip.addStop(clusterTarget);
+                    indicesForCurrTrip.add(candidates.size()-1);
+
+                    // collect cluster (at least) up to UTZ_CLUSTER_GOAL and then zigzag to/from cluster to fill remaining capacity.
+                    collectClusterAroundTarget(sparsity);
+
+                    if (sparsity > 50*sparsityMin) {
+                        // We need this to avoid infinite loop in 2 special cases:
+                        // Case 1: last trip may sometimes have low UTZ because there simply isn't enough weight available
+                        // Case 2: some late trip may end up impossible due to weight restrictions (e.g. pick up up to 0.97 UTZ, but there's only large items available after that)
+                        localWalkImprovementsToTrip(currTrip);
+                        bestTrip = currTrip;
+                        bestIndicesForRemoval = indicesForCurrTrip;
+                        break;
+                    }
+
+                    if (utz(currTrip) < UTZ_CLUSTER_GOAL) {
+                        if (tripOption < 2) break; // to speedup
+                        continue;
+                    }
+
+                    // Add detours on the way to/from cluster
+                    if (true) {
+                        // TODO make sure zigzag is always able to complete the route
+                        // TODO detours with higher max detour, but with preference by detour length (similar to clustering)
+                        // Find first/last entry in order to discover detours to/from cluster
+                        localWalkImprovementsToTrip(currTrip);
+                        collectDetours(currTrip.firstEntry(), currTrip.lastEntry(), sparsity, detourModifier);
+                    }
+
+                    // Is this best tripOption for current target?
+                    if (utz(currTrip) >= UTZ_TRIP_GOAL) {
+                        localWalkImprovementsToTrip(currTrip);
+                        currTrip.updateMeters();
+                        if (bestTrip == null || currTrip.meters < bestTrip.meters) {
+                            // TODO when choosing best among many options, place some value on high utz as well?
+                            bestTrip = currTrip;
+                            bestIndicesForRemoval = indicesForCurrTrip;
+                        }
+                    } else {
+                        // We didn't reach enough detours so next tripOption let's be willing to accept longer detours
+                        detourModifier *= 1.1;
+                    }
+
+                }
+            }
+
+            // Add current trip to route.
+            trips.add(bestTrip);
+            routeMeters += bestTrip.meters;
+            weightRemaining -= bestTrip.weightSum;
+
+            // Print statistics of this trip
+            if (verbose) {
+                System.out.println(
+                        "Trip #" + trips.size() +
+                                " overall " + Math.round(bestTrip.meters / 1000) + "km, " +
+                                "target " + Math.round(targetDist / 1000) + "km, " +
+                                "detours " + Math.round((bestTrip.meters - 2 * targetDist) / 1000) + "km, " +
+                                bestTrip.ids.size() + " stops, " +
+                                "utz " + utz(bestTrip) +
+                                ", acceptableClusterSparsity " + Math.round(sparsity / 1000) + "km " +
+                                "(min bound " + Math.round(sparsityMin / 1000) + "km) " +
+                                "trip target " + clusterTarget
+                );
+            }
+
+            // Remove selected from candidates
+            Collections.sort(bestIndicesForRemoval, Collections.reverseOrder()); // Need to delete in reverse order
+            for (int index : bestIndicesForRemoval) {
+                candidates.remove(index);
+            }
+        }
+
+        void collectClusterAroundTarget(double maxSparsity) {
+            while (true) {
+                int bestIndex = -1;
+                double bestHeuristicVal = Double.POSITIVE_INFINITY;
+                for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
+                    int candidateId = candidates.get(candidateIndex);
+
+                    // Is candidate already used within this trip?
+                    if (currTrip.used[candidateId]) continue;
+
+                    // Does candidate fit within weight bounds?
+                    if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
+
+                    // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
+                    double sparsity = Double.POSITIVE_INFINITY;
+                    for (int id : currTrip.ids) {
+                        sparsity = Math.min(sparsity, dist[id][candidateId]);
+                    }
+                    if (sparsity > maxSparsity) continue;
+
+                    // Calculate heuristic value for candidate
+                    double heuristicVal = sparsity;
+
+                    // Add random to heuristic in order to explore many different options for this trip as this function is called many times
+                    if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
+                        // Add random unless we are able to "complete" a trip with this stop
+                        heuristicVal *= (1 + randomSize*rng.nextDouble());
+                    }
+
+                    // TODO more advanced heuristic which gives some consideration to WEIGHT
+                    // as well as possibly other factors, such as problem-childness-from-previous rounds or number
+                    // of close neighbors still available as candidates
+
+                    if (sparsity <= maxSparsity && heuristicVal < bestHeuristicVal) {
+                        bestHeuristicVal = heuristicVal;
+                        bestIndex = candidateIndex;
+                    }
+
+                }
+                if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight/sparsity)
+
+                // Add closest node to cluster
+                indicesForCurrTrip.add(bestIndex);
+                int candidateId = candidates.get(bestIndex);
+                currTrip.addStop(candidateId);
+            }
+        }
+
+        // Add detours on the way to/from cluster.
+        // Iterate candidates in order of furthest to closest.
+        // If a candidate fits on the trip and the detour isn't too much, then we include it.
+        // We always choose greedily whether we want to add to the beginning or end of our trip.
+        void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
+            for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
+                int candidateId = candidates.get(candidateIndex);
+                if (currTrip.used[candidateId]) continue;
+                if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
+
+                double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
+                double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
+                double detourCost = Math.min(detourCost1, detourCost2);
+
+                // Old way of doing it
+                //if (detourCost > 0.01 * sparsity) continue; // 0.01-0.03 range is ok
+
+                // Failed experiment: make threshold shrink towards home (dont do this before charting loneliness of node)
+                //double shrinkage = (1 - ((20000000 - dist[candidateId][1]) / 20000000));
+                //if (detourCost <= detourModifier * sparsity * shrinkage) {
+
+                if (detourCost <= detourModifier * sparsity) {
+                    if (detourCost1 < detourCost2) {
+                        // Case: add to beginning ("on the way to cluster")
+                        closest1 = candidateId;
+                        currTrip.addStop(0, candidateId);
+                        indicesForCurrTrip.add(candidateIndex);
+                    }
+                    else {
+                        // Case: add to end ("on the way from cluster")
+                        closest2 = candidateId;
+                        currTrip.addStop(candidateId);
+                        indicesForCurrTrip.add(candidateIndex);
+                    }
+                }
+
+            }
+        }
+
+        // This method will local walk the order within a single trip to a local optima.
+        void localWalkImprovementsToTrip(Trip trip) {
+            int n = trip.ids.size();
+            int curr = 0;
+            for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
+                int currId = trip.ids.get(curr);
+                int prevId = (curr>0 ? trip.ids.get(curr-1) : 1); // trip starts and ends at 1
+                int nextId = (curr<n-1 ? trip.ids.get(curr+1) : 1);
+                double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
+
+                int bestPos=curr;
+                double bestPosVal=0;
+                for (int newPos=0; newPos<=n; newPos++) {
+                    if (newPos == curr) continue; // displaces itself and causes bugs
+                    if (newPos == curr+1) continue; // this would also displace itself and cause bugs
+                    prevId = (newPos>0 ? trip.ids.get(newPos-1) : 1); // trip starts and ends at 1
+                    nextId = (newPos<n ? trip.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
+                    double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
+                    double val = insertionVal + removalVal;
+                    //System.out.println("Val to move currId="+currId+" from " + curr + " to " + newPos + " == " + val);
+                    if (val > bestPosVal) {
+                        bestPosVal = val;
+                        bestPos = newPos;
+                    }
+                }
+                if (bestPos == curr) {
+                    countWithoutUpdate++;
+                } else {
+                    countWithoutUpdate = 0;
+                    trip.ids.add(bestPos, currId);
+                    if (bestPos > curr) trip.ids.remove(curr);
+                    else trip.ids.remove(curr+1);
+                    //System.out.println("Moving id="+currId+" from " + curr + " to " + bestPos);
+                }
+
+                curr = (bestPos+1) % n;
+            }
+        }
+
+
+
+
+
+
+
+
+
+
 
         int endId;
         double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
@@ -100,7 +441,7 @@ public class A {
             c[1][0] = 68.073611;
             c[1][1] = 29.315278;
 
-            readChallengingNodes();
+            //readChallengingNodes();
 
             scanner.close();
         }
@@ -119,9 +460,8 @@ public class A {
                     int tripNum = Integer.parseInt(sep[1].substring(1));
                     if (tripNum < 500) challengingNodes.add(id);
                 } catch (Exception ex) {
-                    System.out.println("    Skipping row " + line);
+                    //System.out.println("    Skipping row " + line);
                 }
-
             }
         }
 
@@ -150,11 +490,11 @@ public class A {
                 Scanner scanner = new Scanner(f);
                 while (scanner.hasNext()) {
                     String[] line = scanner.nextLine().split(";");
-                    List<Integer> trip = new ArrayList<>();
+                    Trip trip = new Trip();
                     for (int i = 0; i < line.length; i++) {
                         String element = line[i].replace(" ", "");
                         int id = Integer.parseInt(element);
-                        trip.add(id);
+                        trip.addStop(id);
                     }
                     trips.add(trip);
                 }
@@ -220,396 +560,25 @@ public class A {
             return loneliness;
         }
 
-        double routeMeters = 0;
-        List<List<Integer>> trips;
-        List<Integer> candidates;
-        long weightRemaining;
-
-        void route() {
-            System.out.print("Routing... ");
-            weightRemaining = sumOfAllWeights;
-
-            // These will be filled
-            routeMeters = 0;
-            trips = new ArrayList<>();
-            candidates = new ArrayList<>();
-
-            // Order candidates mainly based on distance from Santa
-            double[] loneliness = getLoneliness();
-            List<IDval> sortHelper = new ArrayList<>();
-            for (int id=2; id<endId; id++) {
-                // Experimenting with more advanced heuristic here
-                double heuristicVal = dist[1][id];
-
-                // Previously discovered challenging nodes should be given priority
-                if (challengingNodes.contains(id)) heuristicVal += 100000L; // TODO remove me, im making results slightly worse
-                if (loneliness[id] > 1000000) heuristicVal += 100000000;  // TODO remove me, im making results slightly worse
-
-                sortHelper.add(new IDval(id, heuristicVal));
-                //Used to be: sortHelper.add(new IDval(id, (long)dist[1][id]));
-            }
-            Collections.sort(sortHelper);
-            for (IDval pair : sortHelper) {
-                candidates.add(pair.id);
-            }
-
-            // Create trips
-            while (!candidates.isEmpty()) {
-                createTrip();
-            }
-
-
-            writeAnsToFile(trips);
-
-            // TODO "steal 1 route from another trip" type chaining starting from last trip
-
-            // TODO simulated annealing type stuff with complete route
-        }
-
-        List<Integer> currTrip;
-        List<Integer> indicesForCurrTrip;
-        long currTripWeight;
-        double targetDist;
-        boolean[] used;
-
-        double getSmallestPossibleClusterSparsity() {
-            double min = 0;
-            double max = 10000000.0;
-            if (possibleToQuicklyFillClusterOfSize(300000)) max = 299999; // minor speedup
-            else min = 300000;
-            while (min+5 < max) {
-                double mid = min+(max-min)/2;
-                if (possibleToQuicklyFillClusterOfSize(mid)) {
-                    max = mid;
-                } else {
-                    min = mid+5;
-                }
-            }
-            return min+5;
-        }
-
-        // This method intentionally overfills (due to use case where this is used to set a lower bound)
-        boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
-
-            // Reinitialize needed globals
-            used = new boolean[endId];
-            currTrip = new ArrayList<>();
-            currTripWeight = 0;
-
-            // Lock down the furthest target
-            int currId = candidates.get(candidates.size()-1);
-            used[currId] = true;
-            currTrip.add(currId);
-            currTripWeight += w[currId];
-
-            double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
-            while (true) {
-                boolean change = false;
-                for (int candidate : candidates) {
-                    if (used[candidate]) continue;
-
-                    // Is candidate within maxSparsity?
-                    double sparsity = Double.POSITIVE_INFINITY;
-                    for (int id : currTrip) {
-                        sparsity = Math.min(sparsity, dist[id][candidate]);
-                    }
-                    if (sparsity > maxSparsity) continue;
-
-                    // Add candidate to cluster
-                    used[candidate] = true;
-                    currTrip.add(candidate);
-                    currTripWeight += w[candidate];
-                    if (currTripWeight >= goal) return true;
-                    change = true;
-                }
-                if (!change) return false;
-            }
-        }
-
-        void createTrip() {
-            // A trip consists of a cluster, and detours on the way to/from cluster.
-            // We want this trip to have high utz with minimal cluster sparsity and minimal detours.
-            // First, binary search a lower bound for cluster sparsity. Use 1.1 * that sparsity (to allow more room for random).
-            // Try many different (greedy, slightly randomized) ways of creating a trip.
-            // Out of these trip options, greedily choose the one with lowest meters.
-
-            double sparsityMin = getSmallestPossibleClusterSparsity();
-
-            // These will be filled
-            currTrip = null;
-            indicesForCurrTrip = null;
-            currTripWeight = 0;
-            used = new boolean[endId];
-
-            // Where to build cluster
-            int clusterTarget = candidates.get(candidates.size()-1);
-            targetDist = dist[1][clusterTarget];
-
-            // these variables will hold the best trip we find
-            double bestTripMeters = Double.POSITIVE_INFINITY;
-            boolean[] bestUsed = null;
-            List<Integer> bestSelectedIds = null;
-            List<Integer> bestSelectedIndicesForRemoval = null;
-            long bestCurrWeightSum = 0;
-
-            // Create several (greedy, slightly randomized) options for trip to target
-            double sparsity = multiplierToSlightlyExpandMaxSparsity * sparsityMin;
-            for (;; sparsity *= 1.04) { // Usually only 1 iteration. In rare cases the initial sparsity is not enough (because we allowed overfill when calculating lower bound for sparsity)
-                for (int tripOption=1; tripOption<=10; tripOption++) {
-
-                    // Reinitialize globals
-                    used = new boolean[endId];
-                    currTrip = new ArrayList<>();
-                    indicesForCurrTrip = new ArrayList<>();
-                    currTripWeight = 0;
-
-                    // Lock down the furthest target
-                    used[clusterTarget] = true;
-                    currTrip.add(clusterTarget);
-                    indicesForCurrTrip.add(candidates.size()-1);
-                    currTripWeight += w[clusterTarget];
-
-                    // collect cluster (at least) up to UTZ_CLUSTER_GOAL and then zigzag to/from cluster to fill remaining capacity.
-                    collectClusterAroundTarget(sparsity);
-
-                    if (currTripWeight == weightRemaining) {
-                        // Special case to fix last trip which may have low UTZ
-                        localWalkImprovementsToTrip(currTrip);
-                        bestTripMeters = getTripMeters(currTrip);
-                        bestUsed = used;
-                        bestSelectedIds = currTrip;
-                        bestSelectedIndicesForRemoval = indicesForCurrTrip;
-                        bestCurrWeightSum = currTripWeight;
-                        break;
-                    }
-
-                    if (utz() < UTZ_CLUSTER_GOAL) {
-                        if (tripOption < 2) break; // to speedup
-                        continue;
-                    }
-
-                    // Zig zags on the way
-                    if (true) {
-                        // TODO make sure zigzag is always able to complete the route
-                        // Find first/last entry in order to discover detours to/from cluster
-                        localWalkImprovementsToTrip(currTrip);
-                        int firstEntry = currTrip.get(0);
-                        int lastEntry = currTrip.get(currTrip.size()-1);
-                        collectZigZags(firstEntry, lastEntry, sparsity);
-                    }
-
-                    // Is this best tripOption for current target?
-                    if (utz() >= UTZ_TRIP_GOAL) {
-                        localWalkImprovementsToTrip(currTrip);
-                        double tripMeters = getTripMeters(currTrip);
-                        if (tripMeters < bestTripMeters) {
-                            bestTripMeters = tripMeters;
-                            bestUsed = used;
-                            bestSelectedIds = currTrip;
-                            bestSelectedIndicesForRemoval = indicesForCurrTrip;
-                            bestCurrWeightSum = currTripWeight;
-                        }
-                    }
-
-                }
-
-                if (bestSelectedIds != null) {
-                    // Set the "best" trip option as the "current" trip.
-                    used = bestUsed;
-                    currTrip = bestSelectedIds;
-                    indicesForCurrTrip = bestSelectedIndicesForRemoval;
-                    currTripWeight = bestCurrWeightSum;
-                    break;
-                }
-            }
-
-            // Add current trip to route.
-            double tripMeters = getTripMeters(currTrip);
-            routeMeters += tripMeters;
-            trips.add(currTrip);
-            weightRemaining -= currTripWeight;
-
-            // Print statistics of this trip
-            if (verbose) {
-                System.out.println(
-                        "Trip #" + trips.size() +
-                                " overall " + Math.round(tripMeters / 1000) + "km, " +
-                                "target " + Math.round(targetDist / 1000) + "km, " +
-                                "detours " + Math.round((tripMeters - 2 * targetDist) / 1000) + "km, " +
-                                currTrip.size() + " stops, " +
-                                "utz " + utz() +
-                                ", acceptableClusterSparsity " + Math.round(sparsity / 1000) + "km " +
-                                "(min bound " + Math.round(sparsityMin / 1000) + "km) " +
-                                "trip target " + clusterTarget
-                );
-            }
-
-            // Remove selected from candidates
-            Collections.sort(indicesForCurrTrip, Collections.reverseOrder()); // Need to delete in reverse order
-            int temp = 0;
-            for (int index : indicesForCurrTrip) {
-                temp += w[candidates.get(index)];
-                candidates.remove(index);
-            }
-            if (temp != currTripWeight) {
-                System.out.println("Mismatch! temp="+temp+", currTripWeight="+currTripWeight);
-            }
-            if (weightRemaining < 0) System.out.println("Weight remaining: " + weightRemaining);
-        }
-
-        double getTripMeters(List<Integer> trip) {
+        double getRouteMeters(List<Trip> trips) {
             double meters = 0;
-            int prevId = 1;
-            for (int id : trip) {
-                meters += dist[prevId][id];
-                prevId = id;
-            }
-            meters += dist[prevId][1];
-            return meters;
-        }
-
-        double getRouteMeters(List<List<Integer>> trips) {
-            double meters = 0;
-            for (List<Integer> trip : trips) {
-                meters += getTripMeters(trip);
+            for (Trip trip : trips) {
+                trip.updateMeters();
+                meters += trip.meters;
             }
             return meters;
         }
 
-        double utz() {
-            return 1.0 * currTripWeight / MAX_TRIP_WEIGHT;
+        double utz(Trip trip) {
+            return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
         }
 
         Random rng = new Random();
 
-        void collectClusterAroundTarget(double maxSparsity) {
-            while (true) {
-                int bestIndex = -1;
-                double bestHeuristicVal = Double.POSITIVE_INFINITY;
-                for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
-                    int candidateId = candidates.get(candidateIndex);
 
-                    // Is candidate already used within this trip?
-                    if (used[candidateId]) continue;
 
-                    // Does candidate fit within weight bounds?
-                    if (currTripWeight + w[candidateId] <= MAX_TRIP_WEIGHT) {
-
-                        // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
-                        double sparsity = Double.POSITIVE_INFINITY;
-                        for (int id : currTrip) {
-                            sparsity = Math.min(sparsity, dist[id][candidateId]);
-                        }
-                        if (sparsity > maxSparsity) continue;
-
-                        // Calculate heuristic value for candidate
-                        double heuristicVal = sparsity;
-
-                        // Add random to heuristic in order to explore many different options for this trip as this function is called many times
-                        if (currTripWeight + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
-                            // Add random unless we are able to "complete" a trip with this stop
-                            heuristicVal *= (1 + randomSize*rng.nextDouble());
-                        }
-
-                        // TODO more advanced heuristic which gives some consideration to WEIGHT
-                        // as well as possibly other factors, such as problem-childness-from-previous rounds or number
-                        // of close neighbors still available as candidates
-
-                        if (sparsity <= maxSparsity && heuristicVal < bestHeuristicVal) {
-                            bestHeuristicVal = heuristicVal;
-                            bestIndex = candidateIndex;
-                        }
-                    }
-                }
-                if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight/sparsity)
-
-                // Add closest node to cluster
-                int candidateId = candidates.get(bestIndex);
-                used[candidateId] = true;
-                currTripWeight += w[candidateId];
-                currTrip.add(candidateId);
-                indicesForCurrTrip.add(bestIndex);
-            }
-        }
-
-        // Add detours on the way to/from cluster.
-        // Iterate candidates in order of furthest to closest.
-        // If a candidate fits on the trip and the detour isn't too much, then we include it.
-        // We always choose greedily whether we want to add to the beginning or end of our trip.
-        void collectZigZags(int closest1, int closest2, double sparsity) {
-            for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
-                int candidateId = candidates.get(candidateIndex);
-                if (used[candidateId]) continue;
-                if (currTripWeight + w[candidateId] <= MAX_TRIP_WEIGHT) {
-                    double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
-                    double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
-                    double detourCost = Math.min(detourCost1, detourCost2);
-
-                    // Old way of doing it
-                    //if (detourCost > 0.01 * sparsity) continue; // 0.01-0.03 range is ok
-
-                    // TODO make threshold expand on the way up and shrink on the way down (dont do this before charting loneliness of node)
-                    if (detourCost <= 0.01 * sparsity) {
-                        used[candidateId] = true;
-                        currTripWeight += w[candidateId];
-                        indicesForCurrTrip.add(candidateIndex);
-                        if (detourCost1 < detourCost2) {
-                            // Case: add to beginning ("on the way to cluster")
-                            closest1 = candidateId;
-                            currTrip.add(0, candidateId);
-                        }
-                        else {
-                            // Case: add to end ("on the way from cluster")
-                            closest2 = candidateId;
-                            currTrip.add(candidateId);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Given a list of ids representing current trip in order (excluding home destination),
-        // this method will local walk the order to a local optima (and modify the input list accordingly).
-        void localWalkImprovementsToTrip(List<Integer> order) {
-            int n = order.size();
-            int curr = 0;
-            for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
-                int currId = order.get(curr);
-                int prevId = (curr>0 ? order.get(curr-1) : 1); // trip starts and ends at 1
-                int nextId = (curr<n-1 ? order.get(curr+1) : 1);
-                double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
-
-                int bestPos=curr;
-                double bestPosVal=0;
-                for (int newPos=0; newPos<=n; newPos++) {
-                    if (newPos == curr) continue; // displaces itself and causes bugs
-                    if (newPos == curr+1) continue; // this would also displace itself and cause bugs
-                    prevId = (newPos>0 ? order.get(newPos-1) : 1); // trip starts and ends at 1
-                    nextId = (newPos<n ? order.get(newPos) : 1); // item which will be at newPos+1 after displacement
-                    double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
-                    double val = insertionVal + removalVal;
-                    //System.out.println("Val to move currId="+currId+" from " + curr + " to " + newPos + " == " + val);
-                    if (val > bestPosVal) {
-                        bestPosVal = val;
-                        bestPos = newPos;
-                    }
-                }
-                if (bestPos == curr) {
-                    countWithoutUpdate++;
-                } else {
-                    countWithoutUpdate = 0;
-                    order.add(bestPos, currId);
-                    if (bestPos > curr) order.remove(curr);
-                    else order.remove(curr+1);
-                    //System.out.println("Moving id="+currId+" from " + curr + " to " + bestPos);
-                }
-
-                curr = (bestPos+1) % n;
-            }
-        }
-
-        void writeAnsToFile(List<List<Integer>> ans) {
-            if (ans.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
+        void writeAnsToFile(List<Trip> trips) {
+            if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
             // Choose name for output file
             int nextFreeId = 1;
             String fileNameStub = "santamap";
@@ -620,11 +589,11 @@ public class A {
                 else break;
             }
 
-            System.out.println("Writing solution of value " + formatAnsValue(getRouteMeters(ans)) + " to " + fileName);
+            System.out.println("Writing solution of value " + formatAnsValue(getRouteMeters(trips)) + " to " + fileName);
             // Write solution to file
             try (Writer writer = new BufferedWriter(new OutputStreamWriter(
                     new FileOutputStream(fileName), "utf-8"))) {
-                for (List<Integer> trip : ans) {
+                for (Trip trip : trips) {
                     writer.write(tripToString(trip) + "\n");
                 }
             } catch (Exception e) {
@@ -632,9 +601,9 @@ public class A {
             }
         }
 
-        String tripToString(List<Integer> trip) {
+        String tripToString(Trip trip) {
             String line = "";
-            for (int id : trip) {
+            for (int id : trip.ids) {
                 line += id +"; ";
             }
             line = line.substring(0, line.length()-2);
@@ -644,6 +613,49 @@ public class A {
         String formatAnsValue(double val) {
             NumberFormat formatter = new DecimalFormat("#0.000");
             return formatter.format(val/1e9);
+        }
+
+        class Trip {
+
+            List<Integer> ids;
+            double meters;
+            boolean[] used;
+            long weightSum;
+
+            public Trip() {
+                ids = new ArrayList<>();
+                meters = 0;
+                used = new boolean[endId];
+                weightSum = 0;
+            }
+
+            // Note: meters need to be updated separately.
+            void addStop(int id) {
+                addStop(ids.size(), id);
+            }
+            void addStop(int i, int id) {
+                used[id] = true;
+                weightSum += w[id];
+                ids.add(i, id);
+            }
+
+            int firstEntry() {
+                return ids.get(0);
+            }
+            int lastEntry() {
+                return ids.get(ids.size()-1);
+            }
+
+            void updateMeters() {
+                meters = 0;
+                int prevId = 1;
+                for (int id : ids) {
+                    meters += dist[prevId][id];
+                    prevId = id;
+                }
+                meters += dist[prevId][1];
+            }
+
         }
 
 
