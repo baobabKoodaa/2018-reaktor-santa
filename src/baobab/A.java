@@ -1,5 +1,7 @@
 package baobab;
 
+import com.sun.org.apache.xpath.internal.SourceTree;
+
 import java.io.*;
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
@@ -38,25 +40,30 @@ public class A {
         // Debug
         boolean verbose = false;
 
+        // Reduce file spam
+        double bestSavedVal = Double.POSITIVE_INFINITY;
+
         void solve() throws Exception {
             readInput();
             preCalcAllDistances();
 
-            int actionType = 3;
-            if (actionType == 1) loadAndComparePreviousSolutions();
+            int actionType = 4;
+                 if (actionType == 1) loadAndComparePreviousSolutions();
             else if (actionType == 2) createRouteFromScratch();
-            else {
-                while (true) {
-                    createRouteFromScratch();
-                }
-            }
-
+            else if (actionType == 3) foreverCreateRoutesFromScratch();
+            else if (actionType == 4) foreverImproveAnExistingRoute();
         }
 
         double routeMeters = 0;
         List<Trip> trips;
         List<Integer> candidates;
         long weightRemaining;
+
+        void foreverCreateRoutesFromScratch() {
+            while (true) {
+                createRouteFromScratch();
+            }
+        }
 
         void createRouteFromScratch() {
             System.out.print("Creating route from scratch... ");
@@ -90,20 +97,189 @@ public class A {
                 createTrip();
             }
 
-
             writeAnsToFile(trips);
+        }
 
-            // TODO
-            // for each trip :
-            //     while utz < 0.96
-            //         try to steal routes from other trips
-
-            // TODO EXPLODE: detach all nodes whose "detour" value exceeds some threshold
-            // maybe do it probabilistically so some random nodes get shuffled at the same time, too
-            // reconstruct by shuffling the list of detached nodes and attaching each (non probabilistically?) to most suitable trip
-            // after that try to local walk for a while again
-
+        void foreverImproveAnExistingRoute() throws FileNotFoundException {
+            Double val = loadPreviouslyFoundSolution(getFilePath("santamap706"));
+            if (val == null) return;
+            while (true) {
+                if (!isSolutionValid(trips)) throw new RuntimeException("Solution invalid at 1");
+                localWalkSingleDestinationTransfers();
+                if (!isSolutionValid(trips)) throw new RuntimeException("Solution invalid at 2");
+                probabilisticDetachment();
+            }
             // TODO simulated annealing type stuff with complete route
+        }
+
+        // Detach all nodes whose "detour" value exceeds some threshold. Insert them back to good trips in random order.
+        void probabilisticDetachment() {
+            double valBeforeDetachment = getRouteMeters(trips);
+            List<DetachmentCandidate> d = new ArrayList<>();
+            for (Trip trip : trips) {
+                for (int i=0; i<trip.ids.size(); i++) {
+                    int currId = trip.ids.get(i);
+                    if (w[currId] > 100000) continue; // Only detach small items
+                    int prevId = (i > 0 ? trip.ids.get(i-1) : 1);
+                    int nextId = (i < trip.ids.size()-1 ? trip.ids.get(i+1) : 1);
+                    double val = dist[prevId][currId] + dist[currId][nextId] - dist[prevId][nextId];
+                    // TODO: probabilistically so some random nodes get detached at the same time, too
+                    d.add(new DetachmentCandidate(trip, i, val));
+                }
+            }
+            Collections.sort(d, Collections.reverseOrder());
+            List<Integer> detachedIds = new ArrayList<>();
+            HashMap<Trip, List<Integer>> removeIndices = new HashMap<>();
+            for (int i=0; i<d.size() && d.get(i).val > 20000; i++) {
+                DetachmentCandidate detach = d.get(i);
+                int id = detach.trip.ids.get(detach.index);
+                List<Integer> removeList = removeIndices.get(detach.trip);
+                if (removeList == null) {
+                    removeList = new ArrayList<>();
+                    removeIndices.put(detach.trip, removeList);
+                }
+                removeList.add(detach.index);
+                detachedIds.add(id);
+            }
+            for (Map.Entry<Trip, List<Integer>> entry : removeIndices.entrySet()) {
+                Trip trip = entry.getKey();
+                List<Integer> list = entry.getValue();
+                Collections.sort(list, Collections.reverseOrder());
+                for (int i : list) {
+                    trip.removeIndex(i); // No need to update meters yet
+                }
+            }
+
+
+
+            Collections.shuffle(detachedIds);
+            for (int currId : detachedIds) {
+
+                //System.out.println("Placing id " + currId);
+
+                // These will be filled
+                Trip bestCandidate = null;
+                double bestCandidateInsertionVal = Double.NEGATIVE_INFINITY;
+                int bestCandidateInsertionPos = 0;
+
+                for (Trip taker : trips) {
+                    if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT) continue;
+                    int takerBestPos = -1;
+                    double takerBestPosInsertionVal = Integer.MIN_VALUE;
+                    for (int newPos=0; newPos<=taker.ids.size(); newPos++) {
+                        int prevId = (newPos>0 ? taker.ids.get(newPos-1) : 1); // trip starts and ends at 1
+                        int nextId = (newPos<taker.ids.size() ? taker.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
+                        double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
+                        if (insertionVal > takerBestPosInsertionVal) {
+                            takerBestPosInsertionVal = insertionVal;
+                            takerBestPos = newPos;
+                        }
+                    }
+                    if (bestCandidate == null || takerBestPosInsertionVal > bestCandidateInsertionVal) {
+                        bestCandidate = taker;
+                        bestCandidateInsertionVal = takerBestPosInsertionVal;
+                        bestCandidateInsertionPos = takerBestPos;
+                    }
+                }
+
+                if (bestCandidate == null) {
+                    System.out.println("Unable to find placement for id="+currId+", creating new trip for it.");
+                    bestCandidate = new Trip();
+                    bestCandidateInsertionPos = 0;
+                    trips.add(bestCandidate);
+                }
+                bestCandidate.addStop(bestCandidateInsertionPos, currId); // No need to update meters yet
+            }
+            double valAfterDetachment = getRouteMeters(trips);
+            double diff = valBeforeDetachment - valAfterDetachment;
+            System.out.print("Detached " + detachedIds.size() + " destinations (" + Math.round(100.0*detachedIds.size()/(endId-2)) + "%) ");
+            System.out.println("Solution value now " + formatAnsValue(valAfterDetachment) + " (diff " + diff +")");
+        }
+
+        class DetachmentCandidate implements Comparable<DetachmentCandidate> {
+
+            Trip trip;
+            int index;
+            double val;
+
+            public DetachmentCandidate(Trip trip, int index, double val) {
+                this.trip = trip;
+                this.index = index;
+                this.val = val;
+            }
+
+            @Override
+            public int compareTo(DetachmentCandidate o) {
+                if (this.val - o.val < 0) return -1;
+                if (this.val - o.val > 0) return 1;
+                return 0;
+            }
+        }
+
+        void localWalkSingleDestinationTransfers() {
+            long lastSaveTime = System.currentTimeMillis();
+            while (true) {
+                boolean alive = false;
+                for (Trip taker : trips) {
+                    while (utz(taker) < 0.99) {
+                        // Try to steal routes from other trips
+                        boolean takerImproved = false;
+                        for (Trip giver : trips) {
+                            if (taker == giver) continue;
+                            for (int i=0; i<giver.ids.size(); i++) {
+                                if (transferIndex(i, giver, taker)) {
+                                    takerImproved = true;
+                                }
+                            }
+                        }
+                        if (!takerImproved) break;
+                        else alive = true;
+                    }
+                }
+
+                // Save to file every now and then
+                double val = getRouteMeters(trips);
+                if (val < bestSavedVal) {
+                    if (System.currentTimeMillis() > lastSaveTime+60000) {
+                        writeAnsToFile(trips);
+                    }
+                }
+
+                if (!alive) {
+                    System.out.println("LocalWalkSingleDestinationTransfers is done, solution value " + val);
+                    return;
+                }
+            }
+        }
+
+        boolean transferIndex(int index, Trip giver, Trip taker) {
+            int currId = giver.ids.get(index);
+            if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT) return false;
+            int prevId = (index>0 ? giver.ids.get(index-1) : 1); // trip starts and ends at 1
+            int nextId = (index<giver.ids.size()-1 ? giver.ids.get(index+1) : 1);
+            double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
+
+            int bestPos = -1;
+            double bestPosInsertionVal = Integer.MIN_VALUE;
+            for (int newPos=0; newPos<=taker.ids.size(); newPos++) {
+                prevId = (newPos>0 ? taker.ids.get(newPos-1) : 1); // trip starts and ends at 1
+                nextId = (newPos<taker.ids.size() ? taker.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
+                double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
+                if (insertionVal > bestPosInsertionVal) {
+                    bestPosInsertionVal = insertionVal;
+                    bestPos = newPos;
+                }
+            }
+            if (removalVal + bestPosInsertionVal < 0) {
+                return false;
+            } else {
+                giver.meters += removalVal;
+                taker.meters += bestPosInsertionVal;
+                taker.addStop(bestPos, currId);
+                giver.removeIndex(index);
+                //System.out.println("        Moving id="+currId+" for a gain of " + (bestPosInsertionVal+removalVal));
+                return true;
+            }
         }
 
         double getSmallestPossibleClusterSparsity() {
@@ -123,7 +299,6 @@ public class A {
         }
 
         // This method intentionally overfills (due to use case where this is used to set a lower bound)
-
         boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
 
             currTrip = new Trip();
@@ -465,13 +640,12 @@ public class A {
             }
         }
 
-        void loadAndComparePreviousSolutions() {
+        void loadAndComparePreviousSolutions() throws FileNotFoundException {
             int bestI = 0;
             double bestVal = Double.POSITIVE_INFINITY;
             for (int i=1 ;; i++) {
-                String filePath = "outputs" + File.separator + "santamap" + i + ".txt";
-                File file = new File(filePath);
-                if (!file.exists()) break;
+                String filePath = getFilePath("santamap" + i);
+                if (!new File(filePath).exists()) break;
                 Double val = loadPreviouslyFoundSolution(filePath);
                 if (val != null && val < bestVal) {
                     bestVal = val;
@@ -481,30 +655,58 @@ public class A {
             System.out.println("Best solution i="+bestI+" val=" + formatAnsValue(bestVal));
         }
 
-        Double loadPreviouslyFoundSolution(String filePath) {
-            try {
-                System.out.print("Loading " + filePath + "... ");
-                trips = new ArrayList<>();
-                File f = new File(filePath);
-                if (!f.exists()) throw new RuntimeException("File doesn't exist: " + filePath);
-                Scanner scanner = new Scanner(f);
-                while (scanner.hasNext()) {
-                    String[] line = scanner.nextLine().split(";");
-                    Trip trip = new Trip();
+        String getFilePath(String fileName) {
+            return "outputs" + File.separator + fileName + ".txt";
+        }
+
+        Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
+            System.out.print("Loading " + filePath + "... ");
+            trips = new ArrayList<>();
+            File f = new File(filePath);
+            if (!f.exists()) throw new RuntimeException("File doesn't exist: " + filePath);
+            Scanner scanner = new Scanner(f);
+            while (scanner.hasNext()) {
+                String[] line = scanner.nextLine().split(";");
+                Trip trip = new Trip();
+                try {
                     for (int i = 0; i < line.length; i++) {
                         String element = line[i].replace(" ", "");
                         int id = Integer.parseInt(element);
                         trip.addStop(id);
                     }
                     trips.add(trip);
+                } catch (Exception ex) {
+                    System.out.println("Exception: " + ex.toString());
+                    return null;
                 }
-                double val = getRouteMeters(trips);
-                System.out.println("Solution value " + formatAnsValue(val));
-                return val;
-            } catch (Exception ex) {
-                System.out.println("Exception: " + ex.toString());
-                return null;
             }
+            if (!isSolutionValid(trips)) return null;
+            double val = getRouteMeters(trips);
+            bestSavedVal = Math.min(bestSavedVal, val);
+            System.out.println("Solution value " + formatAnsValue(val));
+            return val;
+
+        }
+
+        boolean isSolutionValid(List<Trip> trips) {
+            HashSet<Integer> validityCheck = new HashSet<>();
+            for (Trip trip : trips) {
+                for (int id : trip.ids) {
+                    if (!validityCheck.add(id)) {
+                        System.out.println("Invalid solution! Id " + id + " appears twice!");
+                        return false;
+                    }
+                }
+                if (trip.weightSum > MAX_TRIP_WEIGHT) {
+                    System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
+                    return false;
+                }
+            }
+            if (validityCheck.size() != endId-2) {
+                System.out.println("Invalid solution! Expected " + (endId-2) + " stops, but actual was " + validityCheck.size());
+                return false;
+            }
+            return true;
         }
 
         void preCalcAllDistances() throws Exception {
@@ -563,8 +765,7 @@ public class A {
         double getRouteMeters(List<Trip> trips) {
             double meters = 0;
             for (Trip trip : trips) {
-                trip.updateMeters();
-                meters += trip.meters;
+                meters += trip.updateMeters();
             }
             return meters;
         }
@@ -579,6 +780,12 @@ public class A {
 
         void writeAnsToFile(List<Trip> trips) {
             if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
+            double val = getRouteMeters(trips);
+            if (val+0.001 >= bestSavedVal) {
+                return;
+            }
+            bestSavedVal = val;
+
             // Choose name for output file
             int nextFreeId = 1;
             String fileNameStub = "santamap";
@@ -589,11 +796,12 @@ public class A {
                 else break;
             }
 
-            System.out.println("Writing solution of value " + formatAnsValue(getRouteMeters(trips)) + " to " + fileName);
+            System.out.println("Writing solution of value " + formatAnsValue(val) + " to " + fileName);
             // Write solution to file
             try (Writer writer = new BufferedWriter(new OutputStreamWriter(
                     new FileOutputStream(fileName), "utf-8"))) {
                 for (Trip trip : trips) {
+                    if (trip.isEmpty()) continue;
                     writer.write(tripToString(trip) + "\n");
                 }
             } catch (Exception e) {
@@ -638,6 +846,11 @@ public class A {
                 weightSum += w[id];
                 ids.add(i, id);
             }
+            void removeIndex(int i) {
+                int id = ids.remove(i);
+                used[id] = false;
+                weightSum -= w[id];
+            }
 
             int firstEntry() {
                 return ids.get(0);
@@ -646,16 +859,31 @@ public class A {
                 return ids.get(ids.size()-1);
             }
 
-            void updateMeters() {
+            double updateMeters() {
                 meters = 0;
+                if (ids.isEmpty()) return 0;
                 int prevId = 1;
                 for (int id : ids) {
                     meters += dist[prevId][id];
                     prevId = id;
                 }
                 meters += dist[prevId][1];
+                return meters;
             }
 
+            boolean isEmpty() {
+                return ids.isEmpty();
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                return this == o;
+            }
+
+            @Override
+            public int hashCode() {
+                return (int) (ids.size() + meters + weightSum*79);
+            }
         }
 
 
