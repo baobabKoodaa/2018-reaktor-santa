@@ -32,22 +32,33 @@ public class A {
         double SANTA_HOME_LONGITUDE = 29.315278;
         int MAX_TRIP_WEIGHT = 10000000;
 
-        // Hyperparameters
+        // Hyperparameters for route creation
         double randomSize = 0.58; // At one point this was local walked to 0.58 (TODO again)
         double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
         double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
 
+        // Hyperparameters for simulated annealing
+        boolean usingSA = false;
+        double maxTemperature = 10000000.0;
+        double temperature = maxTemperature;
+        double coolingRate = 0.9999999;
+
         // Reduce print spam
         boolean verbose = false;
-        double startTime = System.currentTimeMillis();
         double lastPrintedScore = Double.POSITIVE_INFINITY;
         double lowestKnownScore = Double.POSITIVE_INFINITY;
+        long startTime = System.currentTimeMillis();
+        long timeWhenBestScoreReached = startTime;
         long lastScorePrintTime = 0;
         long printIntervalSeconds = 1;
+        double lastPval;
+        double lastPvalProposalVal;
+        int[] SAcount = new int[2];
 
         // Reduce file spam
-        double bestSavedVal = Double.POSITIVE_INFINITY;
+        String saveFolderPath;
+        double bestSavedScore = 7900000000.0;
         double lastScoreSaveTime = 0;
         double saveIntervalSeconds = 120;
 
@@ -58,6 +69,7 @@ public class A {
         Random rng;
 
         void solve() throws Exception {
+            createSaveFolder();
             readInput();
             preCalcAllDistances();
 
@@ -65,38 +77,48 @@ public class A {
             rng = new Random(seed);
             System.out.println("Seeding random with " + seed);
 
-            int actionType = 5;
+            int actionType = 6;
                  if (actionType == 1) loadAndComparePreviousSolutions();
             else if (actionType == 2) createRouteFromScratch();
             else if (actionType == 3) foreverCreateRoutesFromScratch();
             else if (actionType == 4) foreverImproveAnExistingRoute();
             else if (actionType == 5) randomRouteHillClimb();
-            //else if (actionType == 7) randomRouteSimulatedAnnealing();
+            else if (actionType == 6) randomRouteSimulatedAnnealing();
         }
 
         void randomRouteHillClimb() {
             createBadRouteRandomly();
             while (true) {
                 periodicals();
-                //localWalkImprovementsToTrips(trips);
-                //localWalkSingleDestinationTransfers();
+                proposeRandomSwap();
+                proposeRandomSteal();
+            }
+        }
+
+        void randomRouteSimulatedAnnealing() {
+            usingSA = true;
+            createBadRouteRandomly();
+            while (true) {
+                periodicals();
                 proposeRandomSwap();
                 proposeRandomSteal();
             }
         }
 
         void foreverImproveAnExistingRoute() throws FileNotFoundException {
-            Double val = loadPreviouslyFoundSolution(getFilePath("santamap706"));
+            usingSA = true;
+            temperature = 10000.0;//lower!
+            Double val = loadPreviouslyFoundSolution(getFilePath("santamap405"));
             if (val == null) return;
             while (true) {
                 periodicals();
                 //probabilisticDetachment();
+                //localWalkImprovementsToTrips(trips);
                 //localWalkSingleDestinationTransfers();
                 //shuffleAndSortIndividualTrips();
                 proposeRandomSwap();
                 proposeRandomSteal();
             }
-            // TODO simulated annealing
         }
 
         void proposeRandomSwap() {
@@ -108,14 +130,13 @@ public class A {
             int stop1id = trip1.ids.get(stop1index);
             int stop2id = trip2.ids.get(stop2index);
             if (stop1id == stop2id) return;
-            double valThreshold = 0;
             if (trip1 != trip2) {
                 if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
                 if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
                 double replacementVal1 = getReplacementVal(stop1id, stop2index, trip2);
                 double replacementVal2 = getReplacementVal(stop2id, stop1index, trip1);
                 double proposalVal = replacementVal1+replacementVal2;
-                if (proposalVal >= valThreshold) {
+                if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
                     trip1.addStop(stop1index, stop2id);
                     trip2.addStop(stop2index, stop1id);
                     trip1.removeId(stop1id);
@@ -124,15 +145,13 @@ public class A {
             } else {
                 Trip trip = trip1;
                 double proposalVal = getSwapVal(stop1index, stop2index, trip);
-                if (proposalVal >= valThreshold) {
+                if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
                     trip.removeIndex(stop1index);
                     trip.addStop(stop1index, stop2id);
                     trip.removeIndex(stop2index);
                     trip.addStop(stop2index, stop1id);
                 }
             }
-
-
         }
 
         void proposeRandomSteal() {
@@ -147,10 +166,22 @@ public class A {
             double removalVal = getRemovalVal(giverIndex, giver);
             double insertionVal = getInsertionVal(stopId, takerIndex, taker);
             double proposalVal = removalVal + insertionVal;
-            if (proposalVal >= 0) {
+            if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
                 taker.addStop(takerIndex, stopId);
                 giver.removeIndex(giverIndex);
             }
+        }
+
+        boolean simulatedAnnealingAcceptsProposal(double proposalVal) {
+            if (!usingSA) return false;
+            double P = Math.exp(proposalVal / temperature);
+            lastPval = P;
+            lastPvalProposalVal = proposalVal;
+            if (rng.nextDouble() < 0.015) temperature *= coolingRate;
+            boolean accepted = (P >= rng.nextDouble());
+            if (accepted) SAcount[1]++;
+            else SAcount[0]++;
+            return accepted;
         }
 
         double getRemovalVal(int index, Trip trip) {
@@ -868,7 +899,7 @@ public class A {
             trips.add(new Trip());
             if (!isSolutionValid(trips)) return null;
             double val = calcScore(trips);
-            bestSavedVal = Math.min(bestSavedVal, val);
+            bestSavedScore = Math.min(bestSavedScore, val);
             System.out.println("Solution value " + formatAnsValue(val));
             return val;
 
@@ -938,22 +969,35 @@ public class A {
             return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
         }
 
-
+        void createSaveFolder() {
+            String folderNameStub = "run";
+            for (int nextFreeId = 1 ;; nextFreeId++) {
+                saveFolderPath = "outputs" + File.separator + folderNameStub + nextFreeId;
+                File saveFolder = new File(saveFolderPath);
+                if (!saveFolder.exists()) {
+                    saveFolder.mkdir();
+                    break;
+                }
+            }
+        }
 
         void writeAnsToFile(List<Trip> trips) {
+            if (saveFolderPath == null || saveFolderPath.isEmpty()) {
+                throw new RuntimeException("Save folder not defined!");
+            }
             if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
             double val = calcScore(trips);
-            if (val+0.00001 >= bestSavedVal) {
+            if (val+0.00001 >= bestSavedScore) {
                 return;
             }
-            bestSavedVal = val;
+            bestSavedScore = val;
 
             // Choose name for output file
             int nextFreeId = 1;
             String fileNameStub = "santamap";
             String fileName;
             while (true) {
-                fileName = "outputs" + File.separator + fileNameStub + nextFreeId + ".txt";
+                fileName = saveFolderPath + File.separator + fileNameStub + nextFreeId + ".txt";
                 if (new File(fileName).exists()) nextFreeId++;
                 else break;
             }
@@ -964,25 +1008,11 @@ public class A {
                     new FileOutputStream(fileName), "utf-8"))) {
                 for (Trip trip : trips) {
                     if (trip.isEmpty()) continue;
-                    writer.write(tripToString(trip) + "\n");
+                    writer.write(trip.toString() + "\n");
                 }
             } catch (Exception e) {
                 e.printStackTrace();
             }
-        }
-
-        String tripToString(Trip trip) {
-            String line = "";
-            for (int id : trip.ids) {
-                line += id +"; ";
-            }
-            line = line.substring(0, line.length()-2);
-            return line;
-        }
-
-        String formatAnsValue(double val) {
-            NumberFormat formatter = new DecimalFormat("#0.000");
-            return formatter.format(val/1e9);
         }
 
         class Trip {
@@ -1054,53 +1084,16 @@ public class A {
             public int hashCode() {
                 return (int) (ids.size() + meters + weightSum*79);
             }
-        }
 
-        void periodicals() {
-            periodicallyReportScore();
-            periodicallySave();
-        }
-
-        void periodicallyReportScore() {
-            long time = System.currentTimeMillis();
-            if (time > lastScorePrintTime + printIntervalSeconds * 1000) {
-                lastScorePrintTime = time;
-                printScore();
+            @Override
+            public String toString() {
+                String line = "";
+                for (int id : ids) {
+                    line += id +"; ";
+                }
+                line = line.substring(0, line.length()-2);
+                return line;
             }
-        }
-
-        void periodicallySave() {
-            long time = System.currentTimeMillis();
-            if (time > lastScoreSaveTime + saveIntervalSeconds * 1000) {
-                lastScoreSaveTime = time;
-                writeAnsToFile(trips);
-            }
-        }
-
-        void printScore() {
-            assertSolutionValid();
-            double curr = calcScore(trips);
-            double prev = lastPrintedScore;
-            double diff = prev-curr;
-            String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
-            lastPrintedScore = curr;
-            lowestKnownScore = Math.min(curr, lowestKnownScore);
-            int timeDiff = (int) (System.currentTimeMillis() - startTime) / 1000;
-            int expendedSeconds = timeDiff % 60;
-            int expendedMinutes = (timeDiff/60) % 60;
-            int expendedHours = (timeDiff/60/60);
-            String c = formatAnsValue(curr);
-            String d = formatAnsValue(diff);
-            String b = formatAnsValue(lowestKnownScore);
-            String t = expendedSeconds+"";
-            if (expendedSeconds < 10) t = "0"+t;
-            t = expendedMinutes + ":" + t;
-            if (expendedMinutes < 10) t = "0"+t;
-            if (expendedHours > 0) {
-                t = expendedHours + ":" + t;
-                if (expendedHours < 10) t = "0"+t;
-            }
-            System.out.println(c + " (" + s + d + " diff) (" + b + " best) (" + t + " elapsed)");
         }
 
         void assertSolutionValid() {
@@ -1126,6 +1119,80 @@ public class A {
                 return false;
             }
             return true;
+        }
+
+        void periodicals() {
+            periodicallyReportScore();
+            periodicallySave();
+        }
+
+        void periodicallyReportScore() {
+            long time = System.currentTimeMillis();
+            if (time > lastScorePrintTime + printIntervalSeconds * 1000) {
+                lastScorePrintTime = time;
+                printStatus();
+            }
+        }
+
+        void periodicallySave() {
+            long time = System.currentTimeMillis();
+            if (time > lastScoreSaveTime + saveIntervalSeconds * 1000) {
+                lastScoreSaveTime = time;
+                writeAnsToFile(trips);
+            }
+        }
+
+        String formatElapsedTime(long diff) {
+            int timeDiff = (int) diff / 1000;
+            int expendedSeconds = timeDiff % 60;
+            int expendedMinutes = (timeDiff/60) % 60;
+            int expendedHours = (timeDiff/60/60);
+            String t = expendedSeconds+"";
+            if (expendedSeconds < 10) t = "0"+t;
+            t = expendedMinutes + ":" + t;
+            if (expendedMinutes < 10) t = "0"+t;
+            if (expendedHours > 0) {
+                t = expendedHours + ":" + t;
+                if (expendedHours < 10) t = "0"+t;
+            }
+            return t;
+        }
+
+        void printStatus() {
+            long now = System.currentTimeMillis();
+            assertSolutionValid();
+            double curr = calcScore(trips);
+            double prev = lastPrintedScore;
+            double diff = prev-curr;
+            String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
+            lastPrintedScore = curr;
+            if (curr < lowestKnownScore) {
+                timeWhenBestScoreReached = now;
+                lowestKnownScore = curr;
+            }
+            String c = formatAnsValue(curr);
+            String d = formatAnsValue(diff);
+            String b = formatAnsValue(lowestKnownScore);
+
+            String timeFromStart = formatElapsedTime(now - startTime);
+            String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
+
+            int sum = SAcount[0]+SAcount[1];
+            String extras = "";
+            //extras += "SA latest P value=" + formatProb(lastPval);
+            //extras += " from proposal " + Math.round(lastPvalProposalVal);
+            extras += " Accepted SA proposals: " + SAcount[1] + " of " + (sum + " (" + formatProb(SAcount[1]*1.0/sum) + ")");
+            SAcount = new int[2];
+            System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start)        " + extras);
+        }
+
+        String formatAnsValue(double val) {
+            NumberFormat formatter = new DecimalFormat("#0.000");
+            return formatter.format(val/1e9);
+        }
+
+        String formatProb(double val) {
+            return ""+Math.round(1000000.0*val)/1000000.0;
         }
 
         /************************** UTILITY CODE BELOW THIS LINE **************************/
