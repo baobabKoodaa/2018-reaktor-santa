@@ -37,12 +37,14 @@ public class A {
         double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
         double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
+        boolean enableLocalWalk = true;
 
         // Hyperparameters for simulated annealing
         boolean usingSA = false;
         double maxTemperature = 10000000.0;
         double temperature = maxTemperature;
         double coolingRate = 0.9999999;
+        double coolingReduction = 0.015;
 
         // Reduce print spam
         boolean verbose = false;
@@ -55,8 +57,12 @@ public class A {
         double lastPval;
         double lastPvalProposalVal;
         int[] SAcount = new int[2];
+        int stallCount = 0;
+        long timeWhenLastCheckedForStall = 0;
+        long stallCheckIntervalSeconds = 101;
 
         // Reduce file spam
+        String OUTPUT_DIR = "outputs";
         String saveFolderPath;
         double bestSavedScore = 7900000000.0;
         double lastScoreSaveTime = 0;
@@ -77,17 +83,35 @@ public class A {
             rng = new Random(seed);
             System.out.println("Seeding random with " + seed);
 
-            int actionType = 6;
+            int actionType = 7;
                  if (actionType == 1) loadAndComparePreviousSolutions();
             else if (actionType == 2) createRouteFromScratch();
             else if (actionType == 3) foreverCreateRoutesFromScratch();
             else if (actionType == 4) foreverImproveAnExistingRoute();
             else if (actionType == 5) randomRouteHillClimb();
             else if (actionType == 6) randomRouteSimulatedAnnealing();
+            else if (actionType == 7) jumpStartSimulatedAnnealing();
         }
+
+        /*
+        upper bound on acceptable proposals?
+        temperature which adjusts upwards as well?
+            try to achieve steady % of good vs bad (proposalVals?)
+        hajotuksia & deep diveja?
+        1for2swap
+        2for2swap
+         */
+
+        // TODO tabu search (move hash; set+deque; 1M?)
+
+        // TODO color-outside-the-lines
+
+        // TODO optimize-the-fuck-out-of-a-final-solution
+
 
         void randomRouteHillClimb() {
             createBadRouteRandomly();
+            addEmptyTrips();
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -98,6 +122,7 @@ public class A {
         void randomRouteSimulatedAnnealing() {
             usingSA = true;
             createBadRouteRandomly();
+            addEmptyTrips();
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -105,20 +130,58 @@ public class A {
             }
         }
 
+        void jumpStartSimulatedAnnealing() {
+            usingSA = true;
+            temperature = 10000;
+            createRouteFromScratch();
+            addEmptyTrips();
+            while (true) {
+                periodicals();
+                proposeRandomSwap();
+                proposeRandomSteal();
+            }
+        }
+
+        void addEmptyTrips() {
+            // These provide some flexibility when moving between solutions
+            trips.add(new Trip());
+            trips.add(new Trip());
+        }
+
+        void periodicallyAdjustTemperatureUpwardsIfStalled() {
+            if (!usingSA) return;
+            long now = System.currentTimeMillis();
+            if (timeWhenLastCheckedForStall == 0) {
+                timeWhenLastCheckedForStall = now;
+                return;
+            }
+            if (now > timeWhenLastCheckedForStall + stallCheckIntervalSeconds*1000) {
+                timeWhenLastCheckedForStall = now;
+                if (stallCount < 200*stallCheckIntervalSeconds) {
+                    temperature *= 1.3;
+                    probabilisticDetachment();
+                }
+                stallCount = 0;
+            }
+
+        }
+
         void foreverImproveAnExistingRoute() throws FileNotFoundException {
             usingSA = true;
-            temperature = 10000.0;//lower!
-            Double val = loadPreviouslyFoundSolution(getFilePath("santamap405"));
+            temperature = 10000.0; // Need lower than default temperature
+            Double val = loadPreviouslyFoundSolution(getFilePath("santamap826"));
             if (val == null) return;
             while (true) {
                 periodicals();
                 //probabilisticDetachment();
-                //localWalkImprovementsToTrips(trips);
-                //localWalkSingleDestinationTransfers();
+                //localSearchOrderOfIndividualTrips(trips);
+                //optimalStealsAsLongAsPossible();
                 //shuffleAndSortIndividualTrips();
                 proposeRandomSwap();
                 proposeRandomSteal();
             }
+
+
         }
 
         void proposeRandomSwap() {
@@ -133,10 +196,10 @@ public class A {
             if (trip1 != trip2) {
                 if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
                 if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
-                double replacementVal1 = getReplacementVal(stop1id, stop2index, trip2);
-                double replacementVal2 = getReplacementVal(stop2id, stop1index, trip1);
+                double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
+                double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
                 double proposalVal = replacementVal1+replacementVal2;
-                if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
+                if (acceptProposal(proposalVal)) {
                     trip1.addStop(stop1index, stop2id);
                     trip2.addStop(stop2index, stop1id);
                     trip1.removeId(stop1id);
@@ -144,8 +207,8 @@ public class A {
                 }
             } else {
                 Trip trip = trip1;
-                double proposalVal = getSwapVal(stop1index, stop2index, trip);
-                if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
+                double proposalVal = trip.getSwapVal(stop1index, stop2index);
+                if (acceptProposal(proposalVal)) {
                     trip.removeIndex(stop1index);
                     trip.addStop(stop1index, stop2id);
                     trip.removeIndex(stop2index);
@@ -163,63 +226,32 @@ public class A {
             int takerIndex = rng.nextInt(taker.ids.size()+1);
             int stopId = giver.ids.get(giverIndex);
             if (taker.weightSum + w[stopId] > MAX_TRIP_WEIGHT) return;
-            double removalVal = getRemovalVal(giverIndex, giver);
-            double insertionVal = getInsertionVal(stopId, takerIndex, taker);
+            double removalVal = giver.getRemovalVal(giverIndex);
+            double insertionVal = taker.getInsertionVal(stopId, takerIndex);
             double proposalVal = removalVal + insertionVal;
-            if (proposalVal >= 0 || simulatedAnnealingAcceptsProposal(proposalVal)) {
+            if (acceptProposal(proposalVal)) {
                 taker.addStop(takerIndex, stopId);
                 giver.removeIndex(giverIndex);
             }
         }
 
-        boolean simulatedAnnealingAcceptsProposal(double proposalVal) {
+        boolean acceptProposal(double proposalVal) {
+            if (proposalVal >= 0) return true;
             if (!usingSA) return false;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
             lastPvalProposalVal = proposalVal;
-            if (rng.nextDouble() < 0.015) temperature *= coolingRate;
+            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
             boolean accepted = (P >= rng.nextDouble());
-            if (accepted) SAcount[1]++;
+            if (accepted) {
+                SAcount[1]++;
+                stallCount++;
+            }
             else SAcount[0]++;
             return accepted;
         }
 
-        double getRemovalVal(int index, Trip trip) {
-            int removeId = trip.ids.get(index);
-            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
-            int nextId = (index<trip.ids.size()-1 ? trip.ids.get(index+1) : 1);
-            return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
-        }
 
-        double getReplacementVal(int newId, int index, Trip trip) {
-            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
-            int currId = trip.ids.get(index);
-            int nextId = (index<trip.ids.size()-1 ? trip.ids.get(index+1) : 1);
-            return dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
-        }
-
-        double getInsertionVal(int newId, int index, Trip trip) {
-            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
-            int nextId = (index<trip.ids.size() ? trip.ids.get(index) : 1);
-            return dist[prevId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
-        }
-
-        double getSwapVal(int index1, int index2, Trip trip) {
-            if (index1 > index2) {
-                int helper = index1;
-                index1 = index2;
-                index2 = helper;
-            }
-            int id1 = trip.ids.get(index1);
-            int id2 = trip.ids.get(index2);
-            if (index1+1 == index2) {
-                int prev = (index1>0 ? trip.ids.get(index1-1) : 1);
-                int next = (index2<trip.ids.size()-1 ? trip.ids.get(index2+1) : 1);
-                return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
-            } else {
-                return getReplacementVal(id2, index1, trip) + getReplacementVal(id1, index2, trip);
-            }
-        }
 
         void createBadRouteRandomly() {
             System.out.println("Generating a random solution from scratch...");
@@ -235,9 +267,6 @@ public class A {
                     }
                 }
             }
-            // These provide some flexibility when moving between solutions
-            trips.add(new Trip());
-            trips.add(new Trip());
         }
 
 
@@ -252,7 +281,7 @@ public class A {
             for (Trip trip : trips) {
                 Collections.shuffle(trip.ids);
                 nnTSP(trip);
-                localWalkImprovementsToTrip(trip);
+                localSearchOrderOfIndividualTrip(trip);
             }
             double valAtEnd = calcScore(trips);
             double diff = valAtStart - valAtEnd;
@@ -384,7 +413,7 @@ public class A {
             }
         }
 
-        void localWalkSingleDestinationTransfers() {
+        void optimalStealsAsLongAsPossible() {
             long lastSaveTime = System.currentTimeMillis();
             while (true) {
                 boolean alive = false;
@@ -588,7 +617,7 @@ public class A {
                         // We need this to avoid infinite loop in 2 special cases:
                         // Case 1: last trip may sometimes have low UTZ because there simply isn't enough weight available
                         // Case 2: some late trip may end up impossible due to weight restrictions (e.g. pick up up to 0.97 UTZ, but there's only large items available after that)
-                        localWalkImprovementsToTrip(currTrip);
+                        localSearchOrderOfIndividualTrip(currTrip);
                         bestTrip = currTrip;
                         bestIndicesForRemoval = indicesForCurrTrip;
                         break;
@@ -604,13 +633,13 @@ public class A {
                         // TODO make sure zigzag is always able to complete the route
                         // TODO detours with higher max detour, but with preference by detour length (similar to clustering)
                         // Find first/last entry in order to discover detours to/from cluster
-                        localWalkImprovementsToTrip(currTrip);
-                        collectDetours(currTrip.firstEntry(), currTrip.lastEntry(), sparsity, detourModifier);
+                        localSearchOrderOfIndividualTrip(currTrip);
+                        collectDetours(currTrip.firstId(), currTrip.lastId(), sparsity, detourModifier);
                     }
 
                     // Is this best tripOption for current target?
                     if (utz(currTrip) >= UTZ_TRIP_GOAL) {
-                        localWalkImprovementsToTrip(currTrip);
+                        localSearchOrderOfIndividualTrip(currTrip);
                         currTrip.updateMeters();
                         if (bestTrip == null || currTrip.meters < bestTrip.meters) {
                             // TODO when choosing best among many options, place some value on high utz as well?
@@ -732,49 +761,44 @@ public class A {
             }
         }
 
-        void localWalkImprovementsToTrips(List<Trip> trips) {
+        void localSearchOrderOfIndividualTrips(List<Trip> trips) {
             for (Trip trip : trips) {
-                localWalkImprovementsToTrip(trip);
+                localSearchOrderOfIndividualTrip(trip);
             }
         }
 
         // This method will local walk the order within a single trip to a local optima.
-        void localWalkImprovementsToTrip(Trip trip) {
+        void localSearchOrderOfIndividualTrip(Trip trip) {
+            if (!enableLocalWalk) return;
             if (trip.isEmpty()) return;
             int n = trip.ids.size();
-            int curr = 0;
+            int fromIndex = 0;
             for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
-                int currId = trip.ids.get(curr);
-                int prevId = (curr>0 ? trip.ids.get(curr-1) : 1); // trip starts and ends at 1
-                int nextId = (curr<n-1 ? trip.ids.get(curr+1) : 1);
-                double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
-
-                int bestPos=curr;
+                int id = trip.getIdFromIndex(fromIndex);
+                double removalVal = trip.getRemovalVal(fromIndex);
+                int bestIndex=fromIndex;
                 double bestPosVal=0;
-                for (int newPos=0; newPos<=n; newPos++) {
-                    if (newPos == curr) continue; // displaces itself and causes bugs
-                    if (newPos == curr+1) continue; // this would also displace itself and cause bugs
-                    prevId = (newPos>0 ? trip.ids.get(newPos-1) : 1); // trip starts and ends at 1
-                    nextId = (newPos<n ? trip.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
-                    double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
+                for (int toIndex=0; toIndex<=n; toIndex++) {
+                    if (toIndex == fromIndex) continue; // displaces itself and causes bugs
+                    if (toIndex == fromIndex+1) continue; // this would also displace itself and cause bugs
+
+                    double insertionVal = trip.getInsertionVal(id, toIndex);
                     double val = insertionVal + removalVal;
-                    //System.out.println("Val to move currId="+currId+" from " + curr + " to " + newPos + " == " + val);
                     if (val > bestPosVal) {
                         bestPosVal = val;
-                        bestPos = newPos;
+                        bestIndex = toIndex;
                     }
                 }
-                if (bestPos == curr) {
+                if (bestIndex == fromIndex) {
                     countWithoutUpdate++;
                 } else {
                     countWithoutUpdate = 0;
-                    trip.ids.add(bestPos, currId);
-                    if (bestPos > curr) trip.ids.remove(curr);
-                    else trip.ids.remove(curr+1);
-                    //System.out.println("Moving id="+currId+" from " + curr + " to " + bestPos);
+                    trip.ids.add(bestIndex, id);
+                    if (bestIndex > fromIndex) trip.ids.remove(fromIndex);
+                    else trip.ids.remove(fromIndex+1);
                 }
 
-                curr = (bestPos+1) % n;
+                fromIndex = (bestIndex+1) % n;
             }
         }
 
@@ -853,23 +877,34 @@ public class A {
             }
         }
 
+        String filePathToBestSavedSolution;
+        double bestLoadedScore;
+
         void loadAndComparePreviousSolutions() throws FileNotFoundException {
-            int bestI = 0;
-            double bestVal = Double.POSITIVE_INFINITY;
+            // Trowls through subfolders too
+            bestLoadedScore = Double.POSITIVE_INFINITY;
+            loadAndComparePreviousSolutions(OUTPUT_DIR);
+            File rootDir = new File(OUTPUT_DIR);
+            for (File file : rootDir.listFiles()) {
+                if (file.isDirectory()) loadAndComparePreviousSolutions(file.getPath());
+            }
+            System.out.println("Best solution i="+filePathToBestSavedSolution+" val=" + formatAnsValue(bestLoadedScore));
+        }
+
+        void loadAndComparePreviousSolutions(String folderPath) throws FileNotFoundException {
             for (int i=1 ;; i++) {
-                String filePath = getFilePath("santamap" + i);
+                String filePath = folderPath + File.separator + "santamap" + i + ".txt";
                 if (!new File(filePath).exists()) break;
                 Double val = loadPreviouslyFoundSolution(filePath);
-                if (val != null && val < bestVal) {
-                    bestVal = val;
-                    bestI = i;
+                if (val != null && val < bestLoadedScore) {
+                    bestLoadedScore = val;
+                    filePathToBestSavedSolution = filePath;
                 }
             }
-            System.out.println("Best solution i="+bestI+" val=" + formatAnsValue(bestVal));
         }
 
         String getFilePath(String fileName) {
-            return "outputs" + File.separator + fileName + ".txt";
+            return OUTPUT_DIR + File.separator + fileName + ".txt";
         }
 
         Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
@@ -972,7 +1007,7 @@ public class A {
         void createSaveFolder() {
             String folderNameStub = "run";
             for (int nextFreeId = 1 ;; nextFreeId++) {
-                saveFolderPath = "outputs" + File.separator + folderNameStub + nextFreeId;
+                saveFolderPath = OUTPUT_DIR + File.separator + folderNameStub + nextFreeId;
                 File saveFolder = new File(saveFolderPath);
                 if (!saveFolder.exists()) {
                     saveFolder.mkdir();
@@ -1029,6 +1064,11 @@ public class A {
                 weightSum = 0;
             }
 
+            int getIdFromIndex(int index) {
+                if (index == -1 || index == ids.size()) return 1;
+                return ids.get(index);
+            }
+
             // Note: meters need to be updated separately.
             void addStop(int id) {
                 addStop(ids.size(), id);
@@ -1052,10 +1092,10 @@ public class A {
                 }
             }
 
-            int firstEntry() {
+            int firstId() {
                 return ids.get(0);
             }
-            int lastEntry() {
+            int lastId() {
                 return ids.get(ids.size()-1);
             }
 
@@ -1073,6 +1113,47 @@ public class A {
 
             boolean isEmpty() {
                 return ids.isEmpty();
+            }
+
+            int getSize() {
+                return ids.size();
+            }
+
+            double getRemovalVal(int index) {
+                int prevId = getIdFromIndex(index-1);
+                int removeId = getIdFromIndex(index);
+                int nextId = getIdFromIndex(index+1);
+                return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
+            }
+
+            double getReplacementVal(int newId, int index) {
+                int prevId = getIdFromIndex(index-1);
+                int currId = getIdFromIndex(index);
+                int nextId = getIdFromIndex(index+1);
+                return dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+            }
+
+            double getInsertionVal(int newId, int index) {
+                int prevId = getIdFromIndex(index-1);
+                int shiftedNextId = getIdFromIndex(index);
+                return dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
+            }
+
+            double getSwapVal(int index1, int index2) {
+                if (index1 > index2) {
+                    int helper = index1;
+                    index1 = index2;
+                    index2 = helper;
+                }
+                int id1 = getIdFromIndex(index1);
+                int id2 = getIdFromIndex(index2);
+                if (index1+1 == index2) {
+                    int prev = getIdFromIndex(index1-1);
+                    int next = getIdFromIndex(index2+1);
+                    return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
+                } else {
+                    return getReplacementVal(id2, index1) + getReplacementVal(id1, index2);
+                }
             }
 
             @Override
@@ -1122,6 +1203,7 @@ public class A {
         }
 
         void periodicals() {
+            periodicallyAdjustTemperatureUpwardsIfStalled();
             periodicallyReportScore();
             periodicallySave();
         }
