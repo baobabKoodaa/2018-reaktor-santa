@@ -69,6 +69,7 @@ public class A {
         int stallCount = 0;
         long timeWhenLastCheckedForStall = 0;
         long stallCheckIntervalSeconds = 101;
+        int countMoves = 0;
 
         // Reduce file spam
         String OUTPUT_DIR = "outputs";
@@ -97,6 +98,7 @@ public class A {
             else if (actionType == 5) randomRouteHillClimb();
             else if (actionType == 6) randomRouteSimulatedAnnealing();
             else if (actionType == 7) jumpStartSimulatedAnnealing();
+            else if (actionType == 8) randomRouteTabuSearch();
         }
 
         // TODO color-outside-the-lines
@@ -147,7 +149,6 @@ public class A {
 
         void randomRouteHillClimb() {
             createBadRouteRandomly();
-            addEmptyTrips();
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -156,9 +157,8 @@ public class A {
         }
 
         void randomRouteSimulatedAnnealing() {
-            usingSA = true;
             createBadRouteRandomly();
-            addEmptyTrips();
+            usingSA = true;
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -168,16 +168,22 @@ public class A {
 
         void jumpStartSimulatedAnnealing() {
             createRouteFromScratch();
-            addEmptyTrips();
-
             usingSA = true;
-            temperature = 20000;
+            temperature = 15000;
             tabuSearch = new TabuSearch(true);
             while (true) {
                 periodicals();
                 proposeRandomSwap();
                 proposeRandomSteal();
             }
+        }
+
+        void randomRouteTabuSearch() {
+            createBadRouteRandomly();
+            addEmptyTrips();
+
+            tabuSearch = new TabuSearch(true);
+
         }
 
         void addEmptyTrips() {
@@ -266,9 +272,9 @@ public class A {
             int takerIndex = rng.nextInt(taker.size()+1);
             int stealId = giver.getIdFromIndex(giverIndex);
             if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT) return;
-            TabuValue removalVal = giver.getRemovalVal(giverIndex);
+            double removalVal = giver.getRemovalVal(giverIndex);
             TabuValue insertionVal = taker.getInsertionVal(stealId, takerIndex);
-            double proposalVal = tabuValuesToDouble(removalVal, insertionVal);
+            double proposalVal = removalVal + tabuValuesToDouble(insertionVal);
             if (acceptProposal(proposalVal)) {
                 taker.addStop(takerIndex, stealId);
                 giver.removeIndex(giverIndex);
@@ -323,6 +329,7 @@ public class A {
                     }
                 }
             }
+            addEmptyTrips();
         }
 
 
@@ -572,6 +579,7 @@ public class A {
                 createTrip();
             }
 
+            addEmptyTrips();
             writeAnsToFile(trips);
         }
 
@@ -826,7 +834,7 @@ public class A {
             int fromIndex = 0;
             for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
                 int id = trip.getIdFromIndex(fromIndex);
-                double removalVal = trip.getRemovalVal(fromIndex).val;
+                double removalVal = trip.getRemovalVal(fromIndex);
                 int bestIndex=fromIndex;
                 double bestPosVal=0;
                 for (int toIndex=0; toIndex<=n; toIndex++) {
@@ -979,10 +987,7 @@ public class A {
                     return null;
                 }
             }
-            // These allow flexibility to later modifications
-            trips.add(new Trip());
-            trips.add(new Trip());
-            trips.add(new Trip());
+            addEmptyTrips();
             if (!isSolutionValid(trips)) return null;
             double val = calcScore(trips);
             bestSavedScore = Math.min(bestSavedScore, val);
@@ -1136,6 +1141,7 @@ public class A {
                 weightSum += w[id];
                 ids.add(i, id);
                 tabuSearch.add(tripId, getIdFromIndex(i-1), id, getIdFromIndex(i+1));
+                countMoves++;
             }
             void removeIndex(int i) {
                 int id = ids.remove(i);
@@ -1178,12 +1184,13 @@ public class A {
                 return ids.size();
             }
 
-            TabuValue getRemovalVal(int index) {
+            // Yes it's a special case.
+            double getRemovalVal(int index) {
                 int prevId = getIdFromIndex(index-1);
                 int removeId = getIdFromIndex(index);
                 int nextId = getIdFromIndex(index+1);
                 double val = (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
-                return new TabuValue(val, false);
+                return val;
             }
 
             TabuValue getReplacementVal(int newId, int index) {
@@ -1338,6 +1345,8 @@ public class A {
             String c = formatAnsValue(curr);
             String d = formatAnsValue(diff);
             String b = formatAnsValue(lowestKnownScore);
+            int moves = countMoves;
+            countMoves = 0;
 
             String timeFromStart = formatElapsedTime(now - startTime);
             String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
@@ -1348,12 +1357,11 @@ public class A {
             String extras = "";
             //extras += "SA latest P value=" + formatProb(lastPval);
             //extras += " from proposal " + Math.round(lastPvalProposalVal);
-            extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + tabuAccProportion + ")";
+            extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + tabuAccProportion + ") library size " + tabuSearch.banned.size();
             extras += ", SA acceptance: " + SAcount[1] + " of " + (sumSA + " (" + formatProb(SAcount[1]*1.0/sumSA) + ")");
-            extras += tabuSearch.banned.size();
             SAcount = new int[2];
             tabuSearch.tabuCounts = new int[2];
-            System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start)        " + extras);
+            System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves)       " + extras);
         }
 
         String formatAnsValue(double val) {
