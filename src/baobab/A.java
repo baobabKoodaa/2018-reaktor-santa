@@ -32,6 +32,10 @@ public class A {
         double SANTA_HOME_LONGITUDE = 29.315278;
         int MAX_TRIP_WEIGHT = 10000000;
 
+        // Current solution state
+        List<Trip> trips;
+        int nextFreeTripId = 0;
+
         // Hyperparameters for route creation
         double randomSize = 0.58; // At one point this was local walked to 0.58 (TODO again)
         double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
@@ -44,7 +48,11 @@ public class A {
         double maxTemperature = 10000000.0;
         double temperature = maxTemperature;
         double coolingRate = 0.9999999;
-        double coolingReduction = 0.015;
+        double coolingReduction = 0.012;
+
+        // Tabu search
+        TabuSearch tabuSearch = new TabuSearch(false);
+        int tabuMemory = 10000000;
 
         // Reduce print spam
         boolean verbose = false;
@@ -67,9 +75,6 @@ public class A {
         double bestSavedScore = 7900000000.0;
         double lastScoreSaveTime = 0;
         double saveIntervalSeconds = 120;
-
-        // Current solution state
-        List<Trip> trips;
 
         // Auxiliary
         Random rng;
@@ -102,11 +107,55 @@ public class A {
         2for2swap
          */
 
-        // TODO tabu search (move hash; set+deque; 1M?)
-
         // TODO color-outside-the-lines
 
         // TODO optimize-the-fuck-out-of-a-final-solution
+
+        class TabuSearch {
+            boolean inUse;
+            Deque<Long> removalQ;
+            HashSet<Long> banned;
+            int countAcc;
+            int countDeny;
+
+            public TabuSearch(boolean inUse) {
+                this.inUse = inUse;
+                removalQ = new ArrayDeque<>();
+                banned = new HashSet<>();
+                countAcc = 0;
+                countDeny = 0;
+            }
+
+            boolean banned(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return false;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                boolean tabu = banned.contains(move);
+                if (tabu) countDeny++;
+                else countAcc++;
+                return tabu;
+            }
+
+            void add(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                removalQ.addLast(move);
+                if (removalQ.size() > tabuMemory) {
+                    long oldMove = removalQ.removeFirst();
+                    banned.remove(oldMove);
+                }
+                banned.add(move);
+            }
+
+            private long hashMove(int tripId, int prevId, int currId, int nextId) {
+                long hash = 0;
+                hash += tripId;
+                hash += 1000L * (prevId-1);
+                hash += 10000000L * (currId-1);
+                hash += 100000000000L * (nextId-1);
+                return hash;
+            }
+
+        }
 
 
         void randomRouteHillClimb() {
@@ -131,10 +180,12 @@ public class A {
         }
 
         void jumpStartSimulatedAnnealing() {
-            usingSA = true;
-            temperature = 10000;
             createRouteFromScratch();
             addEmptyTrips();
+
+            usingSA = true;
+            temperature = 10000;
+            tabuSearch = new TabuSearch(true);
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -158,8 +209,8 @@ public class A {
             if (now > timeWhenLastCheckedForStall + stallCheckIntervalSeconds*1000) {
                 timeWhenLastCheckedForStall = now;
                 if (stallCount < 200*stallCheckIntervalSeconds) {
-                    temperature *= 1.3;
-                    probabilisticDetachment();
+                    temperature *= 1.2;
+                    //probabilisticDetachment();
                 }
                 stallCount = 0;
             }
@@ -188,17 +239,17 @@ public class A {
             Trip trip1 = trips.get(rng.nextInt(trips.size()));
             Trip trip2 = trips.get(rng.nextInt(trips.size()));
             if (trip1.isEmpty() || trip2.isEmpty()) return;
-            int stop1index = rng.nextInt(trip1.ids.size());
-            int stop2index = rng.nextInt(trip2.ids.size());
-            int stop1id = trip1.ids.get(stop1index);
-            int stop2id = trip2.ids.get(stop2index);
+            int stop1index = rng.nextInt(trip1.size());
+            int stop2index = rng.nextInt(trip2.size());
+            int stop1id = trip1.getIdFromIndex(stop1index);
+            int stop2id = trip2.getIdFromIndex(stop2index);
             if (stop1id == stop2id) return;
             if (trip1 != trip2) {
                 if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
                 if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
-                double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
-                double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
-                double proposalVal = replacementVal1+replacementVal2;
+                TabuValue replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
+                TabuValue replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
+                double proposalVal = tabuValuesToDouble(replacementVal1, replacementVal2);
                 if (acceptProposal(proposalVal)) {
                     trip1.addStop(stop1index, stop2id);
                     trip2.addStop(stop2index, stop1id);
@@ -207,7 +258,8 @@ public class A {
                 }
             } else {
                 Trip trip = trip1;
-                double proposalVal = trip.getSwapVal(stop1index, stop2index);
+                TabuValue swapVal = trip.getSwapVal(stop1index, stop2index);
+                double proposalVal = tabuValuesToDouble(swapVal);
                 if (acceptProposal(proposalVal)) {
                     trip.removeIndex(stop1index);
                     trip.addStop(stop1index, stop2id);
@@ -222,21 +274,32 @@ public class A {
             Trip taker = trips.get(rng.nextInt(trips.size()));
             if (giver.isEmpty()) return;
             if (giver == taker) return;
-            int giverIndex = rng.nextInt(giver.ids.size());
-            int takerIndex = rng.nextInt(taker.ids.size()+1);
-            int stopId = giver.ids.get(giverIndex);
-            if (taker.weightSum + w[stopId] > MAX_TRIP_WEIGHT) return;
-            double removalVal = giver.getRemovalVal(giverIndex);
-            double insertionVal = taker.getInsertionVal(stopId, takerIndex);
-            double proposalVal = removalVal + insertionVal;
+            int giverIndex = rng.nextInt(giver.size());
+            int takerIndex = rng.nextInt(taker.size()+1);
+            int stealId = giver.getIdFromIndex(giverIndex);
+            if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT) return;
+            TabuValue removalVal = giver.getRemovalVal(giverIndex);
+            TabuValue insertionVal = taker.getInsertionVal(stealId, takerIndex);
+            double proposalVal = tabuValuesToDouble(removalVal, insertionVal);
             if (acceptProposal(proposalVal)) {
-                taker.addStop(takerIndex, stopId);
+                taker.addStop(takerIndex, stealId);
                 giver.removeIndex(giverIndex);
             }
         }
 
+        double tabuValuesToDouble(TabuValue tabu) {
+            if (tabu.tabu) return Double.NEGATIVE_INFINITY;
+            return tabu.val;
+        }
+
+        double tabuValuesToDouble(TabuValue tabu1, TabuValue tabu2) {
+            if (tabu1.tabu && tabu2.tabu) return Double.NEGATIVE_INFINITY;
+            return tabu1.val + tabu2.val;
+        }
+
         boolean acceptProposal(double proposalVal) {
             if (proposalVal >= 0) return true;
+            if (proposalVal < -99999999999999.9) return false; // Dont want these in stats
             if (!usingSA) return false;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
@@ -255,7 +318,7 @@ public class A {
 
         void createBadRouteRandomly() {
             System.out.println("Generating a random solution from scratch...");
-            trips = new ArrayList<>();
+            resetTrips();
             for (int stop=2; stop<endId; stop++) {
                 Collections.shuffle(trips);
                 for (int tripIndex=0 ;; tripIndex++) {
@@ -292,7 +355,7 @@ public class A {
             List<Integer> newOrder = new ArrayList<>();
             boolean[] newUsed = new boolean[endId];
             int prevId = 1;
-            while (newOrder.size() < trip.ids.size()) {
+            while (newOrder.size() < trip.size()) {
                 int closestId = -1;
                 Double minDist = Double.POSITIVE_INFINITY;
                 for (int id : trip.ids) {
@@ -317,11 +380,11 @@ public class A {
             double valBeforeDetachment = calcScore(trips);
             List<DetachmentCandidate> d = new ArrayList<>();
             for (Trip trip : trips) {
-                for (int i=0; i<trip.ids.size(); i++) {
-                    int currId = trip.ids.get(i);
+                for (int i=0; i<trip.size(); i++) {
+                    int currId = trip.getIdFromIndex(i);
                     if (w[currId] > 50000) continue; // Only detach small items
-                    int prevId = (i > 0 ? trip.ids.get(i-1) : 1);
-                    int nextId = (i < trip.ids.size()-1 ? trip.ids.get(i+1) : 1);
+                    int prevId = trip.getIdFromIndex(i-1);
+                    int nextId = trip.getIdFromIndex(i+1);
                     double val = dist[prevId][currId] + dist[currId][nextId] - dist[prevId][nextId];
                     val *= (1 + 2 * rng.nextDouble()); // probabilistically so some random nodes get detached at the same time, too
                     d.add(new DetachmentCandidate(trip, i, val));
@@ -332,7 +395,7 @@ public class A {
             HashMap<Trip, List<Integer>> removeIndices = new HashMap<>();
             for (int i=0; i<d.size() && d.get(i).val > 20000; i++) {
                 DetachmentCandidate detach = d.get(i);
-                int id = detach.trip.ids.get(detach.index);
+                int id = detach.trip.getIdFromIndex(detach.index);
                 List<Integer> removeList = removeIndices.get(detach.trip);
                 if (removeList == null) {
                     removeList = new ArrayList<>();
@@ -364,10 +427,10 @@ public class A {
                     if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT) continue;
                     int takerBestPos = -1;
                     double takerBestPosInsertionVal = Integer.MIN_VALUE;
-                    for (int newPos=0; newPos<=taker.ids.size(); newPos++) {
-                        int prevId = (newPos>0 ? taker.ids.get(newPos-1) : 1); // trip starts and ends at 1
-                        int nextId = (newPos<taker.ids.size() ? taker.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
-                        double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
+                    for (int newPos=0; newPos<=taker.size(); newPos++) {
+                        int prevId = taker.getIdFromIndex(newPos-1);
+                        int shiftedNextId = taker.getIdFromIndex(newPos);
+                        double insertionVal = dist[prevId][shiftedNextId] - (dist[prevId][currId] + dist[currId][shiftedNextId]);
                         if (insertionVal > takerBestPosInsertionVal) {
                             takerBestPosInsertionVal = insertionVal;
                             takerBestPos = newPos;
@@ -418,12 +481,11 @@ public class A {
             while (true) {
                 boolean alive = false;
                 for (Trip taker : trips) {
-                    while (utz(taker) < 0.99) {
-                        // Try to steal routes from other trips
+                    while (true) {
                         boolean takerImproved = false;
                         for (Trip giver : trips) {
                             if (taker == giver) continue;
-                            for (int i=0; i<giver.ids.size(); i++) {
+                            for (int i=0; i<giver.size(); i++) {
                                 if (transferIndex(i, giver, taker)) {
                                     periodicals();
                                     takerImproved = true;
@@ -435,25 +497,22 @@ public class A {
                     }
                 }
 
-                if (!alive) {
-                    //System.out.println(formatAnsValue(val) + " LocalWalkSingleDestinationTransfers is done");
-                    return;
-                }
+                if (!alive) return;
             }
         }
 
         boolean transferIndex(int index, Trip giver, Trip taker) {
-            int currId = giver.ids.get(index);
+            int currId = giver.getIdFromIndex(index);
             if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT) return false;
-            int prevId = (index>0 ? giver.ids.get(index-1) : 1); // trip starts and ends at 1
-            int nextId = (index<giver.ids.size()-1 ? giver.ids.get(index+1) : 1);
+            int prevId = giver.getIdFromIndex(index-1);
+            int nextId = giver.getIdFromIndex(index+1);
             double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
 
             int bestPos = -1;
             double bestPosInsertionVal = Integer.MIN_VALUE;
-            for (int newPos=0; newPos<=taker.ids.size(); newPos++) {
-                prevId = (newPos>0 ? taker.ids.get(newPos-1) : 1); // trip starts and ends at 1
-                nextId = (newPos<taker.ids.size() ? taker.ids.get(newPos) : 1); // item which will be at newPos+1 after displacement
+            for (int newPos=0; newPos<=taker.size(); newPos++) {
+                prevId = taker.getIdFromIndex(newPos-1);
+                nextId = taker.getIdFromIndex(newPos);
                 double insertionVal = dist[prevId][nextId] - (dist[prevId][currId] + dist[currId][nextId]);
                 if (insertionVal > bestPosInsertionVal) {
                     bestPosInsertionVal = insertionVal;
@@ -467,7 +526,6 @@ public class A {
                 taker.meters += bestPosInsertionVal;
                 taker.addStop(bestPos, currId);
                 giver.removeIndex(index);
-                //System.out.println("        Moving id="+currId+" for a gain of " + (bestPosInsertionVal+removalVal));
                 return true;
             }
         }
@@ -495,7 +553,7 @@ public class A {
             weightRemaining = sumOfAllWeights;
 
             // These will be filled
-            trips = new ArrayList<>();
+            resetTrips();
             candidates = new ArrayList<>();
 
             // Order candidates mainly based on distance from Santa
@@ -665,7 +723,7 @@ public class A {
                                 " overall " + Math.round(bestTrip.meters / 1000) + "km, " +
                                 "target " + Math.round(targetDist / 1000) + "km, " +
                                 "detours " + Math.round((bestTrip.meters - 2 * targetDist) / 1000) + "km, " +
-                                bestTrip.ids.size() + " stops, " +
+                                bestTrip.size() + " stops, " +
                                 "utz " + utz(bestTrip) +
                                 ", acceptableClusterSparsity " + Math.round(sparsity / 1000) + "km " +
                                 "(min bound " + Math.round(sparsityMin / 1000) + "km) " +
@@ -771,18 +829,18 @@ public class A {
         void localSearchOrderOfIndividualTrip(Trip trip) {
             if (!enableLocalWalk) return;
             if (trip.isEmpty()) return;
-            int n = trip.ids.size();
+            int n = trip.size();
             int fromIndex = 0;
             for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
                 int id = trip.getIdFromIndex(fromIndex);
-                double removalVal = trip.getRemovalVal(fromIndex);
+                double removalVal = trip.getRemovalVal(fromIndex).val;
                 int bestIndex=fromIndex;
                 double bestPosVal=0;
                 for (int toIndex=0; toIndex<=n; toIndex++) {
                     if (toIndex == fromIndex) continue; // displaces itself and causes bugs
                     if (toIndex == fromIndex+1) continue; // this would also displace itself and cause bugs
 
-                    double insertionVal = trip.getInsertionVal(id, toIndex);
+                    double insertionVal = trip.getInsertionVal(id, toIndex).val;
                     double val = insertionVal + removalVal;
                     if (val > bestPosVal) {
                         bestPosVal = val;
@@ -909,7 +967,7 @@ public class A {
 
         Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
             System.out.print("Loading " + filePath + "... ");
-            trips = new ArrayList<>();
+            resetTrips();
             File f = new File(filePath);
             if (!f.exists()) throw new RuntimeException("File doesn't exist: " + filePath);
             Scanner scanner = new Scanner(f);
@@ -1050,14 +1108,21 @@ public class A {
             }
         }
 
+        void resetTrips() {
+            nextFreeTripId = 0;
+            trips = new ArrayList<>();
+        }
+
         class Trip {
 
+            int tripId;
             List<Integer> ids;
             double meters;
             boolean[] used;
             long weightSum;
 
             public Trip() {
+                tripId = nextFreeTripId++;
                 ids = new ArrayList<>();
                 meters = 0;
                 used = new boolean[endId];
@@ -1077,6 +1142,7 @@ public class A {
                 used[id] = true;
                 weightSum += w[id];
                 ids.add(i, id);
+                tabuSearch.add(tripId, getIdFromIndex(i-1), id, getIdFromIndex(i+1));
             }
             void removeIndex(int i) {
                 int id = ids.remove(i);
@@ -1115,31 +1181,36 @@ public class A {
                 return ids.isEmpty();
             }
 
-            int getSize() {
+            int size() {
                 return ids.size();
             }
 
-            double getRemovalVal(int index) {
+            TabuValue getRemovalVal(int index) {
                 int prevId = getIdFromIndex(index-1);
                 int removeId = getIdFromIndex(index);
                 int nextId = getIdFromIndex(index+1);
-                return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
+                double val = (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
+                return new TabuValue(val, false);
             }
 
-            double getReplacementVal(int newId, int index) {
+            TabuValue getReplacementVal(int newId, int index) {
                 int prevId = getIdFromIndex(index-1);
                 int currId = getIdFromIndex(index);
                 int nextId = getIdFromIndex(index+1);
-                return dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+                double val = dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+                boolean tabu = tabuSearch.banned(tripId, prevId, currId, nextId);
+                return new TabuValue(val, tabu);
             }
 
-            double getInsertionVal(int newId, int index) {
+            TabuValue getInsertionVal(int newId, int index) {
                 int prevId = getIdFromIndex(index-1);
                 int shiftedNextId = getIdFromIndex(index);
-                return dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
+                double val = dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
+                boolean tabu = tabuSearch.banned(tripId, prevId, newId, shiftedNextId);
+                return new TabuValue(val, tabu);
             }
 
-            double getSwapVal(int index1, int index2) {
+            TabuValue getSwapVal(int index1, int index2) {
                 if (index1 > index2) {
                     int helper = index1;
                     index1 = index2;
@@ -1150,9 +1221,16 @@ public class A {
                 if (index1+1 == index2) {
                     int prev = getIdFromIndex(index1-1);
                     int next = getIdFromIndex(index2+1);
-                    return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
+                    double val = dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
+                    boolean tabu1 = tabuSearch.banned(tripId, prev, id2, id1);
+                    boolean tabu2 = tabuSearch.banned(tripId, id2, id1, next);
+                    return new TabuValue(val, tabu1&&tabu2);
                 } else {
-                    return getReplacementVal(id2, index1) + getReplacementVal(id1, index2);
+                    TabuValue rep1 = getReplacementVal(id2, index1);
+                    TabuValue rep2 = getReplacementVal(id1, index2);
+                    double val = rep1.val + rep2.val;
+                    boolean tabu = (rep1.tabu && rep2.tabu);
+                    return new TabuValue(val, tabu);
                 }
             }
 
@@ -1163,17 +1241,29 @@ public class A {
 
             @Override
             public int hashCode() {
-                return (int) (ids.size() + meters + weightSum*79);
+                return this.tripId;
             }
 
             @Override
             public String toString() {
-                String line = "";
+                StringBuilder sb = new StringBuilder();
                 for (int id : ids) {
-                    line += id +"; ";
+                    sb.append(id);
+                    sb.append("; ");
                 }
-                line = line.substring(0, line.length()-2);
-                return line;
+                sb.deleteCharAt(sb.length()-1);
+                sb.deleteCharAt(sb.length()-1);
+                return sb.toString();
+            }
+        }
+
+        class TabuValue {
+            double val;
+            boolean tabu;
+
+            public TabuValue(double val, boolean tabu) {
+                this.val = val;
+                this.tabu = tabu;
             }
         }
 
@@ -1259,12 +1349,17 @@ public class A {
             String timeFromStart = formatElapsedTime(now - startTime);
             String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
 
-            int sum = SAcount[0]+SAcount[1];
+            int sumSA = SAcount[0]+SAcount[1];
+            int sumTabu = tabuSearch.countAcc + tabuSearch.countDeny;
+            String tabuAccProportion = formatProb(tabuSearch.countAcc*1.0/sumTabu);
             String extras = "";
             //extras += "SA latest P value=" + formatProb(lastPval);
             //extras += " from proposal " + Math.round(lastPvalProposalVal);
-            extras += " Accepted SA proposals: " + SAcount[1] + " of " + (sum + " (" + formatProb(SAcount[1]*1.0/sum) + ")");
+            extras += "Tabu acceptance: " + tabuSearch.countAcc + " of " + sumTabu + " (" + tabuAccProportion + ")";
+            extras += ", SA acceptance: " + SAcount[1] + " of " + (sumSA + " (" + formatProb(SAcount[1]*1.0/sumSA) + ")");
             SAcount = new int[2];
+            tabuSearch.countAcc = 0;
+            tabuSearch.countDeny = 0;
             System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start)        " + extras);
         }
 
