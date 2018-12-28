@@ -17,8 +17,6 @@ public class A {
             solve();
         }
 
-        /****************************** START READING HERE ********************************/
-
         // Constants from problem statement
         double SANTA_HOME_LATITUDE = 68.073611;
         double SANTA_HOME_LONGITUDE = 29.315278;
@@ -45,10 +43,12 @@ public class A {
 
         // Tabu search
         TabuSearch tabuSearch = new TabuSearch(false);
-        int tabuMemory = 10000000;
+        int tabuMemory = 10000;
+        double proposalValAcceptanceThreshold = 0;
+        double desiredTabuAccProportion = 0.0001;
 
         // Reduce print spam
-        boolean verbose = false;
+        boolean verbose = true;
         double lastPrintedScore = Double.POSITIVE_INFINITY;
         double lowestKnownScore = Double.POSITIVE_INFINITY;
         long startTime = System.currentTimeMillis();
@@ -93,51 +93,11 @@ public class A {
             else if (actionType == 8) randomRouteTabuSearch();
         }
 
-        // TODO color-outside-the-lines
+        // TODO color-outside-the-lines (when returning to normal weight, slowly increase bonuses from ditching overweight)
 
-        // TODO optimize-the-fuck-out-of-a-final-solution
+        // TODO optimize-the-fuck-out-of-a-final-solution (TSP solver)
 
-        class TabuSearch {
-            boolean inUse;
-            Deque<Long> removalQ;
-            HashSet<Long> banned;
-            int[] tabuCounts;
-
-            public TabuSearch(boolean inUse) {
-                this.inUse = inUse;
-                removalQ = new ArrayDeque<>();
-                banned = new HashSet<>();
-                tabuCounts = new int[2];
-            }
-
-            boolean banned(int tripId, int prevId, int currId, int nextId) {
-                if (!inUse) return false;
-                long move = hashMove(tripId, prevId, currId, nextId);
-                return banned.contains(move);
-            }
-
-            void add(int tripId, int prevId, int currId, int nextId) {
-                if (!inUse) return;
-                long move = hashMove(tripId, prevId, currId, nextId);
-                removalQ.addLast(move);
-                if (removalQ.size() > tabuMemory) {
-                    long oldMove = removalQ.removeFirst();
-                    banned.remove(oldMove);
-                }
-                banned.add(move);
-            }
-
-            private long hashMove(int tripId, int prevId, int currId, int nextId) {
-                long hash = 0;
-                hash += tripId;
-                hash += 1000L * (prevId-1);
-                hash += 10000000L * (currId-1);
-                hash += 100000000000L * (nextId-1);
-                return hash;
-            }
-
-        }
-
+        // TODO detachment mutta reattachin sijaan heitetään kaikki irrotetut johonkin uuteen trippiin/trippeihin
 
         void randomRouteHillClimb() {
             createBadRouteRandomly();
@@ -208,13 +168,12 @@ public class A {
         void foreverImproveAnExistingRoute() throws FileNotFoundException {
             usingSA = true;
             temperature = 10000.0; // Need lower than default temperature
-            Double val = loadPreviouslyFoundSolution(getFilePath("santamap826"));
+            Double val = loadPreviouslyFoundSolution(getFilePath("run14\\santamap76"));
             if (val == null) return;
             while (true) {
                 periodicals();
-                //probabilisticDetachment();
-                //localSearchOrderOfIndividualTrips(trips);
-                //optimalStealsAsLongAsPossible();
+                localSearchOrderOfIndividualTrips(trips);
+                optimalStealsAsLongAsPossible();
                 //shuffleAndSortIndividualTrips();
                 proposeRandomSwap();
                 proposeRandomSteal();
@@ -232,6 +191,8 @@ public class A {
             int stop1id = trip1.getIdFromIndex(stop1index);
             int stop2id = trip2.getIdFromIndex(stop2index);
             if (stop1id == stop2id) return;
+            double d = dist[stop1id][stop2id];
+            //if (rng.nextDouble() < d/21000000) return;
             if (trip1 != trip2) {
                 if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
                 if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
@@ -285,26 +246,34 @@ public class A {
             return tabu1.val + tabu2.val;
         }
 
+        // Decided by either Tabu Search or Simulated Annealing
         boolean acceptProposal(double proposalVal) {
-            if (proposalVal >= 0) return true;
-            if (proposalVal < -99999999999999.9) {
-                // Tabu blocked
-                tabuSearch.tabuCounts[0]++;
-                return false;
+            if (tabuSearch.inUse) {
+                if (proposalVal >= proposalValAcceptanceThreshold) {
+                    tabuSearch.tabuCounts[1]++;
+                    return true;
+                } else {
+                    tabuSearch.tabuCounts[0]++;
+                    return false;
+                }
+            } else if (usingSA) {
+                if (proposalVal >= 0) return true;
+                double P = Math.exp(proposalVal / temperature);
+                lastPval = P;
+                lastPvalProposalVal = proposalVal;
+                if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
+                boolean accepted = (P >= rng.nextDouble());
+                if (accepted) {
+                    SAcount[1]++;
+                    stallCount++;
+                }
+                else SAcount[0]++;
+                return accepted;
+            } else {
+                // Default: hill climb.
+                return (proposalVal >= 0);
             }
-            tabuSearch.tabuCounts[1]++;
-            if (!usingSA) return false;
-            double P = Math.exp(proposalVal / temperature);
-            lastPval = P;
-            lastPvalProposalVal = proposalVal;
-            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
-            boolean accepted = (P >= rng.nextDouble());
-            if (accepted) {
-                SAcount[1]++;
-                stallCount++;
-            }
-            else SAcount[0]++;
-            return accepted;
+
         }
 
 
@@ -673,6 +642,7 @@ public class A {
                         localSearchOrderOfIndividualTrip(currTrip);
                         bestTrip = currTrip;
                         bestIndicesForRemoval = indicesForCurrTrip;
+                        bestTrip.updateMeters();
                         break;
                     }
 
@@ -681,21 +651,15 @@ public class A {
                         continue;
                     }
 
-                    // Add detours on the way to/from cluster
-                    if (true) {
-                        // TODO make sure zigzag is always able to complete the route
-                        // TODO detours with higher max detour, but with preference by detour length (similar to clustering)
-                        // Find first/last entry in order to discover detours to/from cluster
-                        localSearchOrderOfIndividualTrip(currTrip);
-                        collectDetours(currTrip.firstId(), currTrip.lastId(), sparsity, detourModifier);
-                    }
+                    // Add detours on the way to/from cluster (for this we need to know the first/last entry to cluster, so sort the order first)
+                    localSearchOrderOfIndividualTrip(currTrip);
+                    collectDetours(currTrip.firstId(), currTrip.lastId(), sparsity, detourModifier);
 
                     // Is this best tripOption for current target?
                     if (utz(currTrip) >= UTZ_TRIP_GOAL) {
                         localSearchOrderOfIndividualTrip(currTrip);
                         currTrip.updateMeters();
                         if (bestTrip == null || currTrip.meters < bestTrip.meters) {
-                            // TODO when choosing best among many options, place some value on high utz as well?
                             bestTrip = currTrip;
                             bestIndicesForRemoval = indicesForCurrTrip;
                         }
@@ -782,11 +746,47 @@ public class A {
             }
         }
 
+        // TODO detours with higher max detour, but with preference by detour length (similar to clustering)
+        void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
+            while (true) {
+                int bestCandidateIndex = -7;
+                double bestCandidateDetourCost = Double.POSITIVE_INFINITY;
+                int bestCandidateInsertPos = 0;
+                for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
+                    int candidateId = candidates.get(candidateIndex);
+                    if (currTrip.used[candidateId]) continue;
+                    if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
+
+                    double minDetourCostForThisCandidate = Double.POSITIVE_INFINITY;
+                    int bestInsertPosForThisCandidate = 0;
+                    for (int i=0; i<=currTrip.size(); i++) {
+                        int prev = currTrip.getIdFromIndex(i-1);
+                        int next = currTrip.getIdFromIndex(i);
+                        double detourCostForThisCandidate = (dist[prev][candidateId] + dist[candidateId][next]) - dist[prev][next];
+                        if (detourCostForThisCandidate < minDetourCostForThisCandidate) {
+                            minDetourCostForThisCandidate = detourCostForThisCandidate;
+                            bestInsertPosForThisCandidate = i;
+                        }
+                    }
+                    if (minDetourCostForThisCandidate < bestCandidateDetourCost) {
+                        bestCandidateDetourCost = minDetourCostForThisCandidate;
+                        bestCandidateIndex = candidateIndex;
+                        bestCandidateInsertPos = bestInsertPosForThisCandidate;
+                    }
+                }
+                if (bestCandidateIndex >= 0) {
+                    currTrip.addStop(bestCandidateInsertPos, candidates.get(bestCandidateIndex));
+                    indicesForCurrTrip.add(bestCandidateIndex);
+                } else break;
+            }
+
+        }
+
         // Add detours on the way to/from cluster.
         // Iterate candidates in order of furthest to closest.
         // If a candidate fits on the trip and the detour isn't too much, then we include it.
         // We always choose greedily whether we want to add to the beginning or end of our trip.
-        void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
+        void collectDetoursOld(int closest1, int closest2, double sparsity, double detourModifier) {
             for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
                 int candidateId = candidates.get(candidateIndex);
                 if (currTrip.used[candidateId]) continue;
@@ -856,7 +856,46 @@ public class A {
         }
 
 
+        class TabuSearch {
+            boolean inUse;
+            Deque<Long> removalQ;
+            HashSet<Long> banned;
+            int[] tabuCounts;
 
+            public TabuSearch(boolean inUse) {
+                this.inUse = inUse;
+                removalQ = new ArrayDeque<>();
+                banned = new HashSet<>();
+                tabuCounts = new int[2];
+            }
+
+            boolean banned(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return false;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                return banned.contains(move);
+            }
+
+            void add(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                removalQ.addLast(move);
+                if (removalQ.size() > tabuMemory) {
+                    long oldMove = removalQ.removeFirst();
+                    banned.remove(oldMove);
+                }
+                banned.add(move);
+            }
+
+            private long hashMove(int tripId, int prevId, int currId, int nextId) {
+                long hash = 0;
+                hash += tripId;
+                hash += 1000L * (prevId-1);
+                hash += 10000000L * (currId-1);
+                hash += 100000000000L * (nextId-1);
+                return hash;
+            }
+
+        }
 
 
 
@@ -1286,6 +1325,7 @@ public class A {
 
         void periodicals() {
             periodicallyAdjustTemperatureUpwardsIfStalled();
+            periodicallyCoolDownTabuSearch();
             periodicallyReportScore();
             periodicallySave();
         }
@@ -1322,6 +1362,20 @@ public class A {
             return t;
         }
 
+        long lastTimeCheckedTabuSearchChooling = 0;
+
+        void periodicallyCoolDownTabuSearch() {
+            long now = System.currentTimeMillis();
+            if (lastTimeCheckedTabuSearchChooling == 0) {
+                lastTimeCheckedTabuSearchChooling = now;
+                return;
+            }
+            if (now > lastTimeCheckedTabuSearchChooling + 60000) {
+                lastTimeCheckedTabuSearchChooling = now;
+                desiredTabuAccProportion *= 0.999;
+            }
+        }
+
         void printStatus() {
             long now = System.currentTimeMillis();
             assertSolutionValid();
@@ -1345,12 +1399,17 @@ public class A {
 
             int sumSA = SAcount[0]+SAcount[1];
             int sumTabu = tabuSearch.tabuCounts[0] + tabuSearch.tabuCounts[1];
-            String tabuAccProportion = formatProb(tabuSearch.tabuCounts[1]*1.0/sumTabu);
+            double tabuAccProportion = tabuSearch.tabuCounts[1]*1.0/sumTabu;
             String extras = "";
-            //extras += "SA latest P value=" + formatProb(lastPval);
-            //extras += " from proposal " + Math.round(lastPvalProposalVal);
             if (tabuSearch.inUse) {
-                extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + tabuAccProportion + ") library size " + tabuSearch.banned.size() + ", ";
+                extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + formatProb(tabuAccProportion) + ")"
+                        + " (desired " + formatProb(desiredTabuAccProportion) + ")"
+                        + ", library size " + tabuSearch.banned.size() + ", threshold " + proposalValAcceptanceThreshold + ", ";
+                if (tabuAccProportion < desiredTabuAccProportion) {
+                    proposalValAcceptanceThreshold -= 1000;
+                } else if (proposalValAcceptanceThreshold <= -1000) {
+                    proposalValAcceptanceThreshold += 1000;
+                }
                 tabuSearch.tabuCounts = new int[2];
             }
             if (usingSA) {
