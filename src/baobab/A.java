@@ -49,6 +49,7 @@ public class A {
         double temperature = maxTemperature;
         double coolingRate = 0.9999999;
         double coolingReduction = 0.012;
+        double upwardsAdjustment = 0.13;
 
         // Tabu search
         TabuSearch tabuSearch = new TabuSearch(false);
@@ -98,15 +99,6 @@ public class A {
             else if (actionType == 7) jumpStartSimulatedAnnealing();
         }
 
-        /*
-        upper bound on acceptable proposals?
-        temperature which adjusts upwards as well?
-            try to achieve steady % of good vs bad (proposalVals?)
-        hajotuksia & deep diveja?
-        1for2swap
-        2for2swap
-         */
-
         // TODO color-outside-the-lines
 
         // TODO optimize-the-fuck-out-of-a-final-solution
@@ -115,24 +107,19 @@ public class A {
             boolean inUse;
             Deque<Long> removalQ;
             HashSet<Long> banned;
-            int countAcc;
-            int countDeny;
+            int[] tabuCounts;
 
             public TabuSearch(boolean inUse) {
                 this.inUse = inUse;
                 removalQ = new ArrayDeque<>();
                 banned = new HashSet<>();
-                countAcc = 0;
-                countDeny = 0;
+                tabuCounts = new int[2];
             }
 
             boolean banned(int tripId, int prevId, int currId, int nextId) {
                 if (!inUse) return false;
                 long move = hashMove(tripId, prevId, currId, nextId);
-                boolean tabu = banned.contains(move);
-                if (tabu) countDeny++;
-                else countAcc++;
-                return tabu;
+                return banned.contains(move);
             }
 
             void add(int tripId, int prevId, int currId, int nextId) {
@@ -184,7 +171,7 @@ public class A {
             addEmptyTrips();
 
             usingSA = true;
-            temperature = 10000;
+            temperature = 20000;
             tabuSearch = new TabuSearch(true);
             while (true) {
                 periodicals();
@@ -208,8 +195,9 @@ public class A {
             }
             if (now > timeWhenLastCheckedForStall + stallCheckIntervalSeconds*1000) {
                 timeWhenLastCheckedForStall = now;
-                if (stallCount < 200*stallCheckIntervalSeconds) {
-                    temperature *= 1.2;
+                if (stallCount < 20*stallCheckIntervalSeconds) {
+                    System.out.println("Adjusting temperature upwards by " + upwardsAdjustment + " to avoid stalling");
+                    temperature *= upwardsAdjustment;
                     //probabilisticDetachment();
                 }
                 stallCount = 0;
@@ -299,7 +287,12 @@ public class A {
 
         boolean acceptProposal(double proposalVal) {
             if (proposalVal >= 0) return true;
-            if (proposalVal < -99999999999999.9) return false; // Dont want these in stats
+            if (proposalVal < -99999999999999.9) {
+                // Tabu blocked
+                tabuSearch.tabuCounts[0]++;
+                return false;
+            }
+            tabuSearch.tabuCounts[1]++;
             if (!usingSA) return false;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
@@ -1195,10 +1188,10 @@ public class A {
 
             TabuValue getReplacementVal(int newId, int index) {
                 int prevId = getIdFromIndex(index-1);
-                int currId = getIdFromIndex(index);
+                int oldId = getIdFromIndex(index);
                 int nextId = getIdFromIndex(index+1);
-                double val = dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
-                boolean tabu = tabuSearch.banned(tripId, prevId, currId, nextId);
+                double val = dist[prevId][oldId] + dist[oldId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+                boolean tabu = tabuSearch.banned(tripId, prevId, newId, nextId);
                 return new TabuValue(val, tabu);
             }
 
@@ -1350,16 +1343,16 @@ public class A {
             String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
 
             int sumSA = SAcount[0]+SAcount[1];
-            int sumTabu = tabuSearch.countAcc + tabuSearch.countDeny;
-            String tabuAccProportion = formatProb(tabuSearch.countAcc*1.0/sumTabu);
+            int sumTabu = tabuSearch.tabuCounts[0] + tabuSearch.tabuCounts[1];
+            String tabuAccProportion = formatProb(tabuSearch.tabuCounts[1]*1.0/sumTabu);
             String extras = "";
             //extras += "SA latest P value=" + formatProb(lastPval);
             //extras += " from proposal " + Math.round(lastPvalProposalVal);
-            extras += "Tabu acceptance: " + tabuSearch.countAcc + " of " + sumTabu + " (" + tabuAccProportion + ")";
+            extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + tabuAccProportion + ")";
             extras += ", SA acceptance: " + SAcount[1] + " of " + (sumSA + " (" + formatProb(SAcount[1]*1.0/sumSA) + ")");
+            extras += tabuSearch.banned.size();
             SAcount = new int[2];
-            tabuSearch.countAcc = 0;
-            tabuSearch.countDeny = 0;
+            tabuSearch.tabuCounts = new int[2];
             System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start)        " + extras);
         }
 
