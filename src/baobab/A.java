@@ -1,7 +1,5 @@
 package baobab;
 
-import com.sun.org.apache.xpath.internal.SourceTree;
-
 import java.io.*;
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
@@ -29,101 +27,243 @@ public class A {
 
         /****************************** START READING HERE ********************************/
 
+        // Constants from problem statement
+        double SANTA_HOME_LATITUDE = 68.073611;
+        double SANTA_HOME_LONGITUDE = 29.315278;
         int MAX_TRIP_WEIGHT = 10000000;
 
         // Hyperparameters
-        double randomSize = 0.58; // At one point this was local walked to here (TODO again)
+        double randomSize = 0.58; // At one point this was local walked to 0.58 (TODO again)
         double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
         double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
 
-        // Debug
+        // Reduce print spam
         boolean verbose = false;
+        double startTime = System.currentTimeMillis();
+        double lastPrintedScore = Double.POSITIVE_INFINITY;
+        double lowestKnownScore = Double.POSITIVE_INFINITY;
+        long lastScorePrintTime = 0;
+        long printIntervalSeconds = 1;
 
         // Reduce file spam
         double bestSavedVal = Double.POSITIVE_INFINITY;
+        double lastScoreSaveTime = 0;
+        double saveIntervalSeconds = 120;
+
+        // Current solution state
+        List<Trip> trips;
+
+        // Auxiliary
+        Random rng;
 
         void solve() throws Exception {
             readInput();
             preCalcAllDistances();
 
-            int actionType = 4;
+            long seed = System.currentTimeMillis();
+            rng = new Random(seed);
+            System.out.println("Seeding random with " + seed);
+
+            int actionType = 5;
                  if (actionType == 1) loadAndComparePreviousSolutions();
             else if (actionType == 2) createRouteFromScratch();
             else if (actionType == 3) foreverCreateRoutesFromScratch();
             else if (actionType == 4) foreverImproveAnExistingRoute();
+            else if (actionType == 5) randomRouteHillClimb();
+            //else if (actionType == 7) randomRouteSimulatedAnnealing();
         }
 
-        double routeMeters = 0;
-        List<Trip> trips;
-        List<Integer> candidates;
-        long weightRemaining;
-
-        void foreverCreateRoutesFromScratch() {
+        void randomRouteHillClimb() {
+            createBadRouteRandomly();
             while (true) {
-                createRouteFromScratch();
+                periodicals();
+                //localWalkImprovementsToTrips(trips);
+                //localWalkSingleDestinationTransfers();
+                proposeRandomSwap();
+                proposeRandomSteal();
             }
-        }
-
-        void createRouteFromScratch() {
-            System.out.print("Creating route from scratch... ");
-            weightRemaining = sumOfAllWeights;
-
-            // These will be filled
-            routeMeters = 0;
-            trips = new ArrayList<>();
-            candidates = new ArrayList<>();
-
-            // Order candidates mainly based on distance from Santa
-            double[] loneliness = getLoneliness();
-            List<IDval> sortHelper = new ArrayList<>();
-            for (int id=2; id<endId; id++) {
-                // Experimenting with more advanced heuristic here
-                double heuristicVal = dist[1][id];
-
-                // Previously discovered challenging nodes should be given priority
-                //if (challengingNodes.contains(id)) heuristicVal += 100000L; // was making results slightly worse
-                //if (loneliness[id] > 1000000) heuristicVal += 100000000;  // was making results slightly worse
-
-                sortHelper.add(new IDval(id, heuristicVal));
-            }
-            Collections.sort(sortHelper);
-            for (IDval pair : sortHelper) {
-                candidates.add(pair.id);
-            }
-
-            // Create trips
-            while (!candidates.isEmpty()) {
-                createTrip();
-            }
-
-            writeAnsToFile(trips);
         }
 
         void foreverImproveAnExistingRoute() throws FileNotFoundException {
             Double val = loadPreviouslyFoundSolution(getFilePath("santamap706"));
             if (val == null) return;
             while (true) {
-                if (!isSolutionValid(trips)) throw new RuntimeException("Solution invalid at 1");
-                localWalkSingleDestinationTransfers();
-                if (!isSolutionValid(trips)) throw new RuntimeException("Solution invalid at 2");
-                probabilisticDetachment();
+                periodicals();
+                //probabilisticDetachment();
+                //localWalkSingleDestinationTransfers();
+                //shuffleAndSortIndividualTrips();
+                proposeRandomSwap();
+                proposeRandomSteal();
             }
-            // TODO simulated annealing type stuff with complete route
+            // TODO simulated annealing
+        }
+
+        void proposeRandomSwap() {
+            Trip trip1 = trips.get(rng.nextInt(trips.size()));
+            Trip trip2 = trips.get(rng.nextInt(trips.size()));
+            if (trip1.isEmpty() || trip2.isEmpty()) return;
+            int stop1index = rng.nextInt(trip1.ids.size());
+            int stop2index = rng.nextInt(trip2.ids.size());
+            int stop1id = trip1.ids.get(stop1index);
+            int stop2id = trip2.ids.get(stop2index);
+            if (stop1id == stop2id) return;
+            double valThreshold = 0;
+            if (trip1 != trip2) {
+                if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
+                if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
+                double replacementVal1 = getReplacementVal(stop1id, stop2index, trip2);
+                double replacementVal2 = getReplacementVal(stop2id, stop1index, trip1);
+                double proposalVal = replacementVal1+replacementVal2;
+                if (proposalVal >= valThreshold) {
+                    trip1.addStop(stop1index, stop2id);
+                    trip2.addStop(stop2index, stop1id);
+                    trip1.removeId(stop1id);
+                    trip2.removeId(stop2id);
+                }
+            } else {
+                Trip trip = trip1;
+                double proposalVal = getSwapVal(stop1index, stop2index, trip);
+                if (proposalVal >= valThreshold) {
+                    trip.removeIndex(stop1index);
+                    trip.addStop(stop1index, stop2id);
+                    trip.removeIndex(stop2index);
+                    trip.addStop(stop2index, stop1id);
+                }
+            }
+
+
+        }
+
+        void proposeRandomSteal() {
+            Trip giver = trips.get(rng.nextInt(trips.size()));
+            Trip taker = trips.get(rng.nextInt(trips.size()));
+            if (giver.isEmpty()) return;
+            if (giver == taker) return;
+            int giverIndex = rng.nextInt(giver.ids.size());
+            int takerIndex = rng.nextInt(taker.ids.size()+1);
+            int stopId = giver.ids.get(giverIndex);
+            if (taker.weightSum + w[stopId] > MAX_TRIP_WEIGHT) return;
+            double removalVal = getRemovalVal(giverIndex, giver);
+            double insertionVal = getInsertionVal(stopId, takerIndex, taker);
+            double proposalVal = removalVal + insertionVal;
+            if (proposalVal >= 0) {
+                taker.addStop(takerIndex, stopId);
+                giver.removeIndex(giverIndex);
+            }
+        }
+
+        double getRemovalVal(int index, Trip trip) {
+            int removeId = trip.ids.get(index);
+            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
+            int nextId = (index<trip.ids.size()-1 ? trip.ids.get(index+1) : 1);
+            return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
+        }
+
+        double getReplacementVal(int newId, int index, Trip trip) {
+            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
+            int currId = trip.ids.get(index);
+            int nextId = (index<trip.ids.size()-1 ? trip.ids.get(index+1) : 1);
+            return dist[prevId][currId] + dist[currId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+        }
+
+        double getInsertionVal(int newId, int index, Trip trip) {
+            int prevId = (index>0 ? trip.ids.get(index-1) : 1);
+            int nextId = (index<trip.ids.size() ? trip.ids.get(index) : 1);
+            return dist[prevId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
+        }
+
+        double getSwapVal(int index1, int index2, Trip trip) {
+            if (index1 > index2) {
+                int helper = index1;
+                index1 = index2;
+                index2 = helper;
+            }
+            int id1 = trip.ids.get(index1);
+            int id2 = trip.ids.get(index2);
+            if (index1+1 == index2) {
+                int prev = (index1>0 ? trip.ids.get(index1-1) : 1);
+                int next = (index2<trip.ids.size()-1 ? trip.ids.get(index2+1) : 1);
+                return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
+            } else {
+                return getReplacementVal(id2, index1, trip) + getReplacementVal(id1, index2, trip);
+            }
+        }
+
+        void createBadRouteRandomly() {
+            System.out.println("Generating a random solution from scratch...");
+            trips = new ArrayList<>();
+            for (int stop=2; stop<endId; stop++) {
+                Collections.shuffle(trips);
+                for (int tripIndex=0 ;; tripIndex++) {
+                    if (tripIndex >= trips.size()) trips.add(new Trip());
+                    Trip trip = trips.get(tripIndex);
+                    if (trip.weightSum + w[stop] <= MAX_TRIP_WEIGHT) {
+                        trip.addStop(stop);
+                        break;
+                    }
+                }
+            }
+            // These provide some flexibility when moving between solutions
+            trips.add(new Trip());
+            trips.add(new Trip());
+        }
+
+
+
+
+
+
+
+        void shuffleAndSortIndividualTrips() {
+            // This seems to absolutely murder results
+            double valAtStart = calcScore(trips);
+            for (Trip trip : trips) {
+                Collections.shuffle(trip.ids);
+                nnTSP(trip);
+                localWalkImprovementsToTrip(trip);
+            }
+            double valAtEnd = calcScore(trips);
+            double diff = valAtStart - valAtEnd;
+            System.out.println(formatAnsValue(valAtEnd) + "(" + formatAnsValue(diff) + ") by shuffleAndSort");
+        }
+
+        void nnTSP(Trip trip) {
+            List<Integer> newOrder = new ArrayList<>();
+            boolean[] newUsed = new boolean[endId];
+            int prevId = 1;
+            while (newOrder.size() < trip.ids.size()) {
+                int closestId = -1;
+                Double minDist = Double.POSITIVE_INFINITY;
+                for (int id : trip.ids) {
+                    if (newUsed[id]) continue;
+                    if (dist[prevId][id] < minDist) {
+                        minDist = dist[prevId][id];
+                        closestId = id;
+                    }
+                }
+                newUsed[closestId] = true;
+                newOrder.add(closestId);
+                prevId = closestId;
+            }
+            trip.used = newUsed;
+            trip.ids = newOrder;
+            // meters will be updated later. weightSum doesn't change.
         }
 
         // Detach all nodes whose "detour" value exceeds some threshold. Insert them back to good trips in random order.
         void probabilisticDetachment() {
-            double valBeforeDetachment = getRouteMeters(trips);
+            // TODO: revert when unsuccessful
+            double valBeforeDetachment = calcScore(trips);
             List<DetachmentCandidate> d = new ArrayList<>();
             for (Trip trip : trips) {
                 for (int i=0; i<trip.ids.size(); i++) {
                     int currId = trip.ids.get(i);
-                    if (w[currId] > 100000) continue; // Only detach small items
+                    if (w[currId] > 50000) continue; // Only detach small items
                     int prevId = (i > 0 ? trip.ids.get(i-1) : 1);
                     int nextId = (i < trip.ids.size()-1 ? trip.ids.get(i+1) : 1);
                     double val = dist[prevId][currId] + dist[currId][nextId] - dist[prevId][nextId];
-                    // TODO: probabilistically so some random nodes get detached at the same time, too
+                    val *= (1 + 2 * rng.nextDouble()); // probabilistically so some random nodes get detached at the same time, too
                     d.add(new DetachmentCandidate(trip, i, val));
                 }
             }
@@ -149,8 +289,6 @@ public class A {
                     trip.removeIndex(i); // No need to update meters yet
                 }
             }
-
-
 
             Collections.shuffle(detachedIds);
             for (int currId : detachedIds) {
@@ -190,10 +328,9 @@ public class A {
                 }
                 bestCandidate.addStop(bestCandidateInsertionPos, currId); // No need to update meters yet
             }
-            double valAfterDetachment = getRouteMeters(trips);
+            double valAfterDetachment = calcScore(trips);
             double diff = valBeforeDetachment - valAfterDetachment;
-            System.out.print("Detached " + detachedIds.size() + " destinations (" + Math.round(100.0*detachedIds.size()/(endId-2)) + "%) ");
-            System.out.println("Solution value now " + formatAnsValue(valAfterDetachment) + " (diff " + diff +")");
+            System.out.println(formatAnsValue(valAfterDetachment) + " Detached " + detachedIds.size() + " destinations (" + Math.round(100.0*detachedIds.size()/(endId-2)) + "%) (diff " + diff +")");
         }
 
         class DetachmentCandidate implements Comparable<DetachmentCandidate> {
@@ -228,6 +365,7 @@ public class A {
                             if (taker == giver) continue;
                             for (int i=0; i<giver.ids.size(); i++) {
                                 if (transferIndex(i, giver, taker)) {
+                                    periodicals();
                                     takerImproved = true;
                                 }
                             }
@@ -237,16 +375,8 @@ public class A {
                     }
                 }
 
-                // Save to file every now and then
-                double val = getRouteMeters(trips);
-                if (val < bestSavedVal) {
-                    if (System.currentTimeMillis() > lastSaveTime+60000) {
-                        writeAnsToFile(trips);
-                    }
-                }
-
                 if (!alive) {
-                    System.out.println("LocalWalkSingleDestinationTransfers is done, solution value " + val);
+                    //System.out.println(formatAnsValue(val) + " LocalWalkSingleDestinationTransfers is done");
                     return;
                 }
             }
@@ -280,6 +410,58 @@ public class A {
                 //System.out.println("        Moving id="+currId+" for a gain of " + (bestPosInsertionVal+removalVal));
                 return true;
             }
+        }
+
+
+
+
+
+
+
+
+
+
+        List<Integer> candidates;
+        long weightRemaining;
+
+        void foreverCreateRoutesFromScratch() {
+            while (true) {
+                createRouteFromScratch();
+            }
+        }
+
+        void createRouteFromScratch() {
+            System.out.print("Creating route from scratch... ");
+            weightRemaining = sumOfAllWeights;
+
+            // These will be filled
+            trips = new ArrayList<>();
+            candidates = new ArrayList<>();
+
+            // Order candidates mainly based on distance from Santa
+            double[] loneliness = getLoneliness();
+            List<IDval> sortHelper = new ArrayList<>();
+            for (int id=2; id<endId; id++) {
+                // Experimenting with more advanced heuristic here
+                double heuristicVal = dist[1][id];
+
+                // Previously discovered challenging nodes should be given priority
+                //if (challengingNodes.contains(id)) heuristicVal += 100000L; // was making results slightly worse
+                //if (loneliness[id] > 1000000) heuristicVal += 100000000;  // was making results slightly worse
+
+                sortHelper.add(new IDval(id, heuristicVal));
+            }
+            Collections.sort(sortHelper);
+            for (IDval pair : sortHelper) {
+                candidates.add(pair.id);
+            }
+
+            // Create trips
+            while (!candidates.isEmpty()) {
+                createTrip();
+            }
+
+            writeAnsToFile(trips);
         }
 
         double getSmallestPossibleClusterSparsity() {
@@ -414,7 +596,6 @@ public class A {
 
             // Add current trip to route.
             trips.add(bestTrip);
-            routeMeters += bestTrip.meters;
             weightRemaining -= bestTrip.weightSum;
 
             // Print statistics of this trip
@@ -457,6 +638,7 @@ public class A {
                     for (int id : currTrip.ids) {
                         sparsity = Math.min(sparsity, dist[id][candidateId]);
                     }
+
                     if (sparsity > maxSparsity) continue;
 
                     // Calculate heuristic value for candidate
@@ -501,13 +683,6 @@ public class A {
                 double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
                 double detourCost = Math.min(detourCost1, detourCost2);
 
-                // Old way of doing it
-                //if (detourCost > 0.01 * sparsity) continue; // 0.01-0.03 range is ok
-
-                // Failed experiment: make threshold shrink towards home (dont do this before charting loneliness of node)
-                //double shrinkage = (1 - ((20000000 - dist[candidateId][1]) / 20000000));
-                //if (detourCost <= detourModifier * sparsity * shrinkage) {
-
                 if (detourCost <= detourModifier * sparsity) {
                     if (detourCost1 < detourCost2) {
                         // Case: add to beginning ("on the way to cluster")
@@ -526,8 +701,15 @@ public class A {
             }
         }
 
+        void localWalkImprovementsToTrips(List<Trip> trips) {
+            for (Trip trip : trips) {
+                localWalkImprovementsToTrip(trip);
+            }
+        }
+
         // This method will local walk the order within a single trip to a local optima.
         void localWalkImprovementsToTrip(Trip trip) {
+            if (trip.isEmpty()) return;
             int n = trip.ids.size();
             int curr = 0;
             for (int countWithoutUpdate=0; countWithoutUpdate<=n;) {
@@ -613,8 +795,8 @@ public class A {
             }
 
             // Add santa's coordinates to input at id 1
-            c[1][0] = 68.073611;
-            c[1][1] = 29.315278;
+            c[1][0] = SANTA_HOME_LATITUDE;
+            c[1][1] = SANTA_HOME_LONGITUDE;
 
             //readChallengingNodes();
 
@@ -680,35 +862,17 @@ public class A {
                     return null;
                 }
             }
+            // These allow flexibility to later modifications
+            trips.add(new Trip());
+            trips.add(new Trip());
+            trips.add(new Trip());
             if (!isSolutionValid(trips)) return null;
-            double val = getRouteMeters(trips);
+            double val = calcScore(trips);
             bestSavedVal = Math.min(bestSavedVal, val);
             System.out.println("Solution value " + formatAnsValue(val));
             return val;
 
         }
-
-        boolean isSolutionValid(List<Trip> trips) {
-            HashSet<Integer> validityCheck = new HashSet<>();
-            for (Trip trip : trips) {
-                for (int id : trip.ids) {
-                    if (!validityCheck.add(id)) {
-                        System.out.println("Invalid solution! Id " + id + " appears twice!");
-                        return false;
-                    }
-                }
-                if (trip.weightSum > MAX_TRIP_WEIGHT) {
-                    System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
-                    return false;
-                }
-            }
-            if (validityCheck.size() != endId-2) {
-                System.out.println("Invalid solution! Expected " + (endId-2) + " stops, but actual was " + validityCheck.size());
-                return false;
-            }
-            return true;
-        }
-
         void preCalcAllDistances() throws Exception {
             System.out.println("Calculating distances...");
             dist = new double[endId][endId];
@@ -762,7 +926,7 @@ public class A {
             return loneliness;
         }
 
-        double getRouteMeters(List<Trip> trips) {
+        double calcScore(List<Trip> trips) {
             double meters = 0;
             for (Trip trip : trips) {
                 meters += trip.updateMeters();
@@ -774,14 +938,12 @@ public class A {
             return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
         }
 
-        Random rng = new Random();
-
 
 
         void writeAnsToFile(List<Trip> trips) {
             if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
-            double val = getRouteMeters(trips);
-            if (val+0.001 >= bestSavedVal) {
+            double val = calcScore(trips);
+            if (val+0.00001 >= bestSavedVal) {
                 return;
             }
             bestSavedVal = val;
@@ -851,6 +1013,14 @@ public class A {
                 used[id] = false;
                 weightSum -= w[id];
             }
+            void removeId(int id) {
+                for (int i=0; i<ids.size(); i++) {
+                    if (ids.get(i) == id) {
+                        removeIndex(i);
+                        return;
+                    }
+                }
+            }
 
             int firstEntry() {
                 return ids.get(0);
@@ -886,6 +1056,77 @@ public class A {
             }
         }
 
+        void periodicals() {
+            periodicallyReportScore();
+            periodicallySave();
+        }
+
+        void periodicallyReportScore() {
+            long time = System.currentTimeMillis();
+            if (time > lastScorePrintTime + printIntervalSeconds * 1000) {
+                lastScorePrintTime = time;
+                printScore();
+            }
+        }
+
+        void periodicallySave() {
+            long time = System.currentTimeMillis();
+            if (time > lastScoreSaveTime + saveIntervalSeconds * 1000) {
+                lastScoreSaveTime = time;
+                writeAnsToFile(trips);
+            }
+        }
+
+        void printScore() {
+            assertSolutionValid();
+            double curr = calcScore(trips);
+            double prev = lastPrintedScore;
+            double diff = prev-curr;
+            String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
+            lastPrintedScore = curr;
+            lowestKnownScore = Math.min(curr, lowestKnownScore);
+            int timeDiff = (int) (System.currentTimeMillis() - startTime) / 1000;
+            int expendedSeconds = timeDiff % 60;
+            int expendedMinutes = (timeDiff/60) % 60;
+            int expendedHours = (timeDiff/60/60);
+            String c = formatAnsValue(curr);
+            String d = formatAnsValue(diff);
+            String b = formatAnsValue(lowestKnownScore);
+            String t = expendedSeconds+"";
+            if (expendedSeconds < 10) t = "0"+t;
+            t = expendedMinutes + ":" + t;
+            if (expendedMinutes < 10) t = "0"+t;
+            if (expendedHours > 0) {
+                t = expendedHours + ":" + t;
+                if (expendedHours < 10) t = "0"+t;
+            }
+            System.out.println(c + " (" + s + d + " diff) (" + b + " best) (" + t + " elapsed)");
+        }
+
+        void assertSolutionValid() {
+            if (!isSolutionValid(trips)) throw new RuntimeException("Solution invalid!");
+        }
+
+        boolean isSolutionValid(List<Trip> trips) {
+            HashSet<Integer> validityCheck = new HashSet<>();
+            for (Trip trip : trips) {
+                for (int id : trip.ids) {
+                    if (!validityCheck.add(id)) {
+                        System.out.println("Invalid solution! Id " + id + " appears twice!");
+                        return false;
+                    }
+                }
+                if (trip.weightSum > MAX_TRIP_WEIGHT) {
+                    System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
+                    return false;
+                }
+            }
+            if (validityCheck.size() != endId-2) {
+                System.out.println("Invalid solution! Expected " + (endId-2) + " stops, but actual was " + validityCheck.size());
+                return false;
+            }
+            return true;
+        }
 
         /************************** UTILITY CODE BELOW THIS LINE **************************/
 
