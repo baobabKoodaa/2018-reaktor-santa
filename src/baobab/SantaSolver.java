@@ -47,18 +47,11 @@ public class SantaSolver {
 
     // Hyperparameters for freeze condition / shaking
     long freezeCheckLastTime = 0;
-    long freezeCheckIntervalSeconds = 180;
+    long freezeCheckIntervalSeconds = 45;
     double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
     double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
-    double freezeCheckMinimumDiff = 500000;
+    double freezeCheckMinimumDiff = 1000000;
     double freezeConditionTemperatureMultiplier = 2;
-
-    // Tabu search
-    TabuSearch tabuSearch = new TabuSearch(false);
-    int tabuMemory = 10000;
-    double proposalValAcceptanceThreshold = 0;
-    double desiredTabuAccProportion = 0.0001;
-    long lastTimeCheckedTabuSearchChooling = 0;
 
     // Reduce print spam
     boolean verbose = true;
@@ -102,7 +95,6 @@ public class SantaSolver {
         else if (actionType == 5) randomRouteHillClimb();
         else if (actionType == 6) randomRouteSimulatedAnnealing();
         else if (actionType == 7) jumpStartSimulatedAnnealing();
-        else if (actionType == 8) randomRouteTabuSearch();
     }
 
     // TODO color-outside-the-lines (when returning to normal weight, slowly increase penalty for staying in / going to the "expanded zone")
@@ -154,7 +146,7 @@ public class SantaSolver {
             return;
         }
         if (now < freezeCheckLastTime + freezeCheckIntervalSeconds * 1000) {
-            // Waiting period not over yet
+            // Freeze check interval not yet complete.
             return;
         }
         if (shakingNeeded()) {
@@ -173,7 +165,7 @@ public class SantaSolver {
         double min = minScoreSinceLastFreezeCheck;
         double max = maxScoreSinceLastFreezeCheck;
         double diff = max - min;
-        System.out.println("Checking for freeze condition... diff " + diff);
+        System.out.println("Checking for freeze condition... diff " + formatAnsValue(diff));
         return (diff < freezeCheckMinimumDiff);
     }
 
@@ -221,9 +213,9 @@ public class SantaSolver {
                 return;
             if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT)
                 return;
-            TabuValue replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
-            TabuValue replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
-            double proposalVal = tabuValuesToDouble(replacementVal1, replacementVal2);
+            double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
+            double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
+            double proposalVal = replacementVal1 + replacementVal2;
             if (acceptProposal(proposalVal)) {
                 trip1.addStop(stop1index, stop2id);
                 trip2.addStop(stop2index, stop1id);
@@ -232,8 +224,7 @@ public class SantaSolver {
             }
         } else {
             Trip trip = trip1;
-            TabuValue swapVal = trip.getSwapVal(stop1index, stop2index);
-            double proposalVal = tabuValuesToDouble(swapVal);
+            double proposalVal = trip.getSwapVal(stop1index, stop2index);
             if (acceptProposal(proposalVal)) {
                 trip.removeIndex(stop1index);
                 trip.addStop(stop1index, stop2id);
@@ -256,37 +247,16 @@ public class SantaSolver {
         if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT)
             return;
         double removalVal = giver.getRemovalVal(giverIndex);
-        TabuValue insertionVal = taker.getInsertionVal(stealId, takerIndex);
-        double proposalVal = removalVal + tabuValuesToDouble(insertionVal);
+        double insertionVal = taker.getInsertionVal(stealId, takerIndex);
+        double proposalVal = removalVal + insertionVal;
         if (acceptProposal(proposalVal)) {
             taker.addStop(takerIndex, stealId);
             giver.removeIndex(giverIndex);
         }
     }
 
-    double tabuValuesToDouble(TabuValue tabu) {
-        if (tabu.tabu)
-            return Double.NEGATIVE_INFINITY;
-        return tabu.val;
-    }
-
-    double tabuValuesToDouble(TabuValue tabu1, TabuValue tabu2) {
-        if (tabu1.tabu && tabu2.tabu)
-            return Double.NEGATIVE_INFINITY;
-        return tabu1.val + tabu2.val;
-    }
-
-    // Decided by either Tabu Search or Simulated Annealing
     boolean acceptProposal(double proposalVal) {
-        if (tabuSearch.inUse) {
-            if (proposalVal >= proposalValAcceptanceThreshold) {
-                tabuSearch.tabuCounts[1]++;
-                return true;
-            } else {
-                tabuSearch.tabuCounts[0]++;
-                return false;
-            }
-        } else if (usingSA) {
+        if (usingSA) {
             if (proposalVal >= 0) return true;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
@@ -301,7 +271,6 @@ public class SantaSolver {
             // Default: hill climb.
             return (proposalVal >= 0);
         }
-
     }
 
 
@@ -534,11 +503,11 @@ public class SantaSolver {
     }
 
     void createRouteFromScratch() {
-        System.out.print("Creating route from scratch... ");
-        weightRemaining = sumOfAllWeights;
+        System.out.println("Creating route from scratch... " + (verbose ? "\n" : ""));
 
-        // These will be filled
+        // Init
         resetTrips();
+        weightRemaining = sumOfAllWeights;
         candidates = new ArrayList<>();
 
         // Order candidates mainly based on distance from Santa
@@ -834,7 +803,7 @@ public class SantaSolver {
                 if (toIndex == fromIndex + 1)
                     continue; // this would also displace itself and cause bugs
 
-                double insertionVal = trip.getInsertionVal(id, toIndex).val;
+                double insertionVal = trip.getInsertionVal(id, toIndex);
                 double val = insertionVal + removalVal;
                 if (val > bestPosVal) {
                     bestPosVal = val;
@@ -1064,7 +1033,7 @@ public class SantaSolver {
         if (trips.isEmpty())
             throw new RuntimeException("Empty ans given in writeOutput call");
         double val = calcScore(trips);
-        if (val + 0.00001 >= bestSavedScore) {
+        if (val + 0.0001 >= bestSavedScore) {
             return;
         }
         bestSavedScore = val;
@@ -1137,7 +1106,6 @@ public class SantaSolver {
             used[id] = true;
             weightSum += w[id];
             ids.add(i, id);
-            tabuSearch.add(tripId, getIdFromIndex(i - 1), id, getIdFromIndex(i + 1));
             countMoves++;
         }
 
@@ -1185,33 +1153,27 @@ public class SantaSolver {
             return ids.size();
         }
 
-        // Yes it's a special case.
         double getRemovalVal(int index) {
             int prevId = getIdFromIndex(index - 1);
             int removeId = getIdFromIndex(index);
             int nextId = getIdFromIndex(index + 1);
-            double val = (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
-            return val;
+            return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
         }
 
-        TabuValue getReplacementVal(int newId, int index) {
+        double getReplacementVal(int newId, int index) {
             int prevId = getIdFromIndex(index - 1);
             int oldId = getIdFromIndex(index);
             int nextId = getIdFromIndex(index + 1);
-            double val = dist[prevId][oldId] + dist[oldId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
-            boolean tabu = tabuSearch.banned(tripId, prevId, newId, nextId);
-            return new TabuValue(val, tabu);
+            return dist[prevId][oldId] + dist[oldId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
         }
 
-        TabuValue getInsertionVal(int newId, int index) {
+        double getInsertionVal(int newId, int index) {
             int prevId = getIdFromIndex(index - 1);
             int shiftedNextId = getIdFromIndex(index);
-            double val = dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
-            boolean tabu = tabuSearch.banned(tripId, prevId, newId, shiftedNextId);
-            return new TabuValue(val, tabu);
+            return dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
         }
 
-        TabuValue getSwapVal(int index1, int index2) {
+        double getSwapVal(int index1, int index2) {
             if (index1 > index2) {
                 int helper = index1;
                 index1 = index2;
@@ -1222,14 +1184,11 @@ public class SantaSolver {
             if (index1 + 1 == index2) {
                 int prev = getIdFromIndex(index1 - 1);
                 int next = getIdFromIndex(index2 + 1);
-                double val = dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
-                boolean tabu1 = tabuSearch.banned(tripId, prev, id2, id1);
-                boolean tabu2 = tabuSearch.banned(tripId, id2, id1, next);
-                return new TabuValue(val, tabu1 && tabu2);
+                return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
             } else {
-                TabuValue rep1 = getReplacementVal(id2, index1);
-                TabuValue rep2 = getReplacementVal(id1, index2);
-                return new TabuValue(rep1.val + rep2.val, rep1.tabu && rep2.tabu);
+                double rep1 = getReplacementVal(id2, index1);
+                double rep2 = getReplacementVal(id1, index2);
+                return rep1 + rep2;
             }
         }
 
@@ -1253,16 +1212,6 @@ public class SantaSolver {
             sb.deleteCharAt(sb.length() - 1);
             sb.deleteCharAt(sb.length() - 1);
             return sb.toString();
-        }
-    }
-
-    class TabuValue {
-        double val;
-        boolean tabu;
-
-        public TabuValue(double val, boolean tabu) {
-            this.val = val;
-            this.tabu = tabu;
         }
     }
 
@@ -1294,7 +1243,6 @@ public class SantaSolver {
 
     void periodicals() {
         periodicallyShakeIfNeeded();
-        periodicallyCoolDownTabuSearch();
         periodicallyCheckScoreAndReportStatus();
         periodicallySave();
     }
@@ -1338,72 +1286,6 @@ public class SantaSolver {
     }
 
 
-    void randomRouteTabuSearch() {
-        createBadRouteRandomly();
-        tabuSearch = new TabuSearch(true);
-        while (true) {
-            periodicals();
-            proposeRandomSteal();
-            proposeRandomSwap();
-        }
-    }
-
-    class TabuSearch {
-        boolean inUse;
-        Deque<Long> removalQ;
-        HashSet<Long> banned;
-        int[] tabuCounts;
-
-        public TabuSearch(boolean inUse) {
-            this.inUse = inUse;
-            removalQ = new ArrayDeque<>();
-            banned = new HashSet<>();
-            tabuCounts = new int[2];
-        }
-
-        boolean banned(int tripId, int prevId, int currId, int nextId) {
-            if (!inUse)
-                return false;
-            long move = hashMove(tripId, prevId, currId, nextId);
-            return banned.contains(move);
-        }
-
-        void add(int tripId, int prevId, int currId, int nextId) {
-            if (!inUse)
-                return;
-            long move = hashMove(tripId, prevId, currId, nextId);
-            removalQ.addLast(move);
-            if (removalQ.size() > tabuMemory) {
-                long oldMove = removalQ.removeFirst();
-                banned.remove(oldMove);
-            }
-            banned.add(move);
-        }
-
-        private long hashMove(int tripId, int prevId, int currId, int nextId) {
-            long hash = 0;
-            hash += tripId;
-            hash += 1000L * (prevId - 1);
-            hash += 10000000L * (currId - 1);
-            hash += 100000000000L * (nextId - 1);
-            return hash;
-        }
-
-    }
-
-    void periodicallyCoolDownTabuSearch() {
-        long now = System.currentTimeMillis();
-        if (lastTimeCheckedTabuSearchChooling == 0) {
-            lastTimeCheckedTabuSearchChooling = now;
-            return;
-        }
-        if (now > lastTimeCheckedTabuSearchChooling + 60000) {
-            lastTimeCheckedTabuSearchChooling = now;
-            desiredTabuAccProportion *= 0.999;
-        }
-    }
-
-
     void printStatus(double curr) {
         long now = System.currentTimeMillis();
         assertSolutionValid();
@@ -1425,20 +1307,7 @@ public class SantaSolver {
         String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
 
         int sumSA = SAcount[0] + SAcount[1];
-        int sumTabu = tabuSearch.tabuCounts[0] + tabuSearch.tabuCounts[1];
-        double tabuAccProportion = tabuSearch.tabuCounts[1] * 1.0 / sumTabu;
         String extras = "";
-        if (tabuSearch.inUse) {
-            extras += "Tabu acceptance: " + tabuSearch.tabuCounts[1] + " of " + sumTabu + " (" + formatProb(tabuAccProportion) + ")"
-                    + " (desired " + formatProb(desiredTabuAccProportion) + ")"
-                    + ", library size " + tabuSearch.banned.size() + ", threshold " + proposalValAcceptanceThreshold + ", ";
-            if (tabuAccProportion < desiredTabuAccProportion) {
-                proposalValAcceptanceThreshold -= 1000;
-            } else if (proposalValAcceptanceThreshold <= -1000) {
-                proposalValAcceptanceThreshold += 1000;
-            }
-            tabuSearch.tabuCounts = new int[2];
-        }
         if (usingSA) {
             extras += "SA acceptance: " + SAcount[1] + " of " + (sumSA + " (" + formatProb(SAcount[1] * 1.0 / sumSA) + ")");
             SAcount = new int[2];
