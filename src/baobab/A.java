@@ -22,12 +22,27 @@ public class A {
         double SANTA_HOME_LONGITUDE = 29.315278;
         int MAX_TRIP_WEIGHT = 10000000;
 
+        // Input will be read into these variables
+        int endId;
+        double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
+        int[] w;
+        long sumOfAllWeights;
+        double[][] dist;
+
         // Current solution state
         List<Trip> trips;
-        int nextFreeTripId = 0;
+        int nextFreeTripId;
+
+        // Route creation variables
+        List<Integer> candidates;
+        long weightRemaining;
+        Trip currTrip;
+        List<Integer> indicesForCurrTrip;
+        double targetDist;
+        Set<Integer> challengingNodes;
 
         // Hyperparameters for route creation
-        double randomSize = 0.58; // At one point this was local walked to 0.58 (TODO again)
+        double randomSize = 0.58; // Optimal around 0.58
         double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
         double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
         double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
@@ -39,13 +54,20 @@ public class A {
         double temperature = maxTemperature;
         double coolingRate = 0.9999999;
         double coolingReduction = 0.015;
-        double upwardsAdjustment = 0.1;
+
+        // Hyperparameters for freeze condition / shaking
+        long freezeCheckLastTime = 0;
+        long freezeCheckIntervalSeconds = 180;
+        double freezeCheckLastScore = Double.POSITIVE_INFINITY;
+        double freezeCheckExpectedScoreImprovement = 500000;
+        double freezeConditionTemperatureMultiplier = 2;
 
         // Tabu search
         TabuSearch tabuSearch = new TabuSearch(false);
         int tabuMemory = 10000;
         double proposalValAcceptanceThreshold = 0;
         double desiredTabuAccProportion = 0.0001;
+        long lastTimeCheckedTabuSearchChooling = 0;
 
         // Reduce print spam
         boolean verbose = true;
@@ -58,9 +80,6 @@ public class A {
         double lastPval;
         double lastPvalProposalVal;
         int[] SAcount = new int[2];
-        int stallCount = 0;
-        long timeWhenLastCheckedForStall = 0;
-        long stallCheckIntervalSeconds = 101;
         int countMoves = 0;
 
         // Reduce file spam
@@ -82,7 +101,7 @@ public class A {
             rng = new Random(seed);
             System.out.println("Seeding random with " + seed);
 
-            int actionType = 7;
+            int actionType = 4;
                  if (actionType == 1) loadAndComparePreviousSolutions();
             else if (actionType == 2) createRouteFromScratch();
             else if (actionType == 3) foreverCreateRoutesFromScratch();
@@ -93,11 +112,14 @@ public class A {
             else if (actionType == 8) randomRouteTabuSearch();
         }
 
-        // TODO color-outside-the-lines (when returning to normal weight, slowly increase bonuses from ditching overweight)
+        // TODO color-outside-the-lines (when returning to normal weight, slowly increase penalty for staying in / going to the "expanded zone")
 
         // TODO optimize-the-fuck-out-of-a-final-solution (TSP solver)
+        // TODO testaa onko yksittäisissä tripeissä ~2% optimoitavaa? esim. bruteta 7-10 kokoset ja katso parannus
 
         // TODO detachment mutta reattachin sijaan heitetään kaikki irrotetut johonkin uuteen trippiin/trippeihin
+
+        // TODO SA restartteja lämpötilaa nostamalla
 
         void randomRouteHillClimb() {
             createBadRouteRandomly();
@@ -122,7 +144,6 @@ public class A {
             createRouteFromScratch();
             usingSA = true;
             temperature = 13000;
-            //tabuSearch = new TabuSearch(true);
             while (true) {
                 periodicals();
                 proposeRandomSwap();
@@ -130,50 +151,52 @@ public class A {
             }
         }
 
-        void randomRouteTabuSearch() {
-            createBadRouteRandomly();
-            tabuSearch = new TabuSearch(true);
-            while (true) {
-                periodicals();
-                proposeRandomSteal();
-                proposeRandomSwap();
-            }
-        }
-
-        void addEmptyTrips() {
-            // These provide some flexibility when moving between solutions
-            trips.add(new Trip());
-            trips.add(new Trip());
-        }
-
-        void periodicallyAdjustTemperatureUpwardsIfStalled() {
+        void periodicallyShakeIfNeeded() {
             if (!usingSA) return;
             long now = System.currentTimeMillis();
-            if (timeWhenLastCheckedForStall == 0) {
-                timeWhenLastCheckedForStall = now;
+            if (freezeCheckLastTime == 0) {
+                // No shake at the first call of this method
+                freezeCheckLastTime = now;
                 return;
             }
-            if (now > timeWhenLastCheckedForStall + stallCheckIntervalSeconds*1000) {
-                timeWhenLastCheckedForStall = now;
-                if (stallCount < 20*stallCheckIntervalSeconds) {
-                    System.out.println("Adjusting temperature upwards by " + upwardsAdjustment + " to avoid stalling");
-                    temperature *= upwardsAdjustment;
-                    //probabilisticDetachment();
-                }
-                stallCount = 0;
+            if (now < freezeCheckLastTime + freezeCheckIntervalSeconds *1000) {
+                // Waiting period not over yet
+                return;
             }
+            if (shakingNeeded()) {
+                System.out.println("Freeze condition detected. Shaking solution...");
+                shake();
+                //oldShake();
+            }
+            freezeCheckLastTime = now;
+            freezeCheckLastScore = calcScore(trips);
+        }
 
+        boolean shakingNeeded() {
+            double scoreNow = calcScore(trips);
+            double improvement = freezeCheckLastScore - scoreNow;
+            return (improvement < freezeCheckExpectedScoreImprovement);
+        }
+
+        void shake () {
+            temperature *= freezeConditionTemperatureMultiplier;
+        }
+
+        void oldShake() {
+            temperature *= freezeConditionTemperatureMultiplier;
+            probabilisticDetachment();
         }
 
         void foreverImproveAnExistingRoute() throws FileNotFoundException {
+            //MAX_TRIP_WEIGHT *= 1.3;
             usingSA = true;
-            temperature = 10000.0; // Need lower than default temperature
-            Double val = loadPreviouslyFoundSolution(getFilePath("run14\\santamap76"));
+            temperature = 1000.0; // Need lower than default temperature
+            Double val = loadPreviouslyFoundSolution(getFilePath("run91\\santamap1"));
             if (val == null) return;
             while (true) {
                 periodicals();
-                localSearchOrderOfIndividualTrips(trips);
-                optimalStealsAsLongAsPossible();
+                //localSearchOrderOfIndividualTrips(trips);
+                //optimalStealsAsLongAsPossible();
                 //shuffleAndSortIndividualTrips();
                 proposeRandomSwap();
                 proposeRandomSteal();
@@ -191,8 +214,6 @@ public class A {
             int stop1id = trip1.getIdFromIndex(stop1index);
             int stop2id = trip2.getIdFromIndex(stop2index);
             if (stop1id == stop2id) return;
-            double d = dist[stop1id][stop2id];
-            //if (rng.nextDouble() < d/21000000) return;
             if (trip1 != trip2) {
                 if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return;
                 if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return;
@@ -265,7 +286,7 @@ public class A {
                 boolean accepted = (P >= rng.nextDouble());
                 if (accepted) {
                     SAcount[1]++;
-                    stallCount++;
+                    freezeCheckLastScore++;
                 }
                 else SAcount[0]++;
                 return accepted;
@@ -502,8 +523,6 @@ public class A {
 
 
 
-        List<Integer> candidates;
-        long weightRemaining;
 
         void foreverCreateRoutesFromScratch() {
             while (true) {
@@ -593,9 +612,7 @@ public class A {
             }
         }
 
-        Trip currTrip;
-        List<Integer> indicesForCurrTrip;
-        double targetDist;
+
 
         void createTrip() {
             // A trip consists of a cluster, and detours on the way to/from cluster.
@@ -746,47 +763,11 @@ public class A {
             }
         }
 
-        // TODO detours with higher max detour, but with preference by detour length (similar to clustering)
-        void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
-            while (true) {
-                int bestCandidateIndex = -7;
-                double bestCandidateDetourCost = Double.POSITIVE_INFINITY;
-                int bestCandidateInsertPos = 0;
-                for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
-                    int candidateId = candidates.get(candidateIndex);
-                    if (currTrip.used[candidateId]) continue;
-                    if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
-
-                    double minDetourCostForThisCandidate = Double.POSITIVE_INFINITY;
-                    int bestInsertPosForThisCandidate = 0;
-                    for (int i=0; i<=currTrip.size(); i++) {
-                        int prev = currTrip.getIdFromIndex(i-1);
-                        int next = currTrip.getIdFromIndex(i);
-                        double detourCostForThisCandidate = (dist[prev][candidateId] + dist[candidateId][next]) - dist[prev][next];
-                        if (detourCostForThisCandidate < minDetourCostForThisCandidate) {
-                            minDetourCostForThisCandidate = detourCostForThisCandidate;
-                            bestInsertPosForThisCandidate = i;
-                        }
-                    }
-                    if (minDetourCostForThisCandidate < bestCandidateDetourCost) {
-                        bestCandidateDetourCost = minDetourCostForThisCandidate;
-                        bestCandidateIndex = candidateIndex;
-                        bestCandidateInsertPos = bestInsertPosForThisCandidate;
-                    }
-                }
-                if (bestCandidateIndex >= 0) {
-                    currTrip.addStop(bestCandidateInsertPos, candidates.get(bestCandidateIndex));
-                    indicesForCurrTrip.add(bestCandidateIndex);
-                } else break;
-            }
-
-        }
-
         // Add detours on the way to/from cluster.
         // Iterate candidates in order of furthest to closest.
         // If a candidate fits on the trip and the detour isn't too much, then we include it.
         // We always choose greedily whether we want to add to the beginning or end of our trip.
-        void collectDetoursOld(int closest1, int closest2, double sparsity, double detourModifier) {
+        void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
             for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
                 int candidateId = candidates.get(candidateIndex);
                 if (currTrip.used[candidateId]) continue;
@@ -856,46 +837,6 @@ public class A {
         }
 
 
-        class TabuSearch {
-            boolean inUse;
-            Deque<Long> removalQ;
-            HashSet<Long> banned;
-            int[] tabuCounts;
-
-            public TabuSearch(boolean inUse) {
-                this.inUse = inUse;
-                removalQ = new ArrayDeque<>();
-                banned = new HashSet<>();
-                tabuCounts = new int[2];
-            }
-
-            boolean banned(int tripId, int prevId, int currId, int nextId) {
-                if (!inUse) return false;
-                long move = hashMove(tripId, prevId, currId, nextId);
-                return banned.contains(move);
-            }
-
-            void add(int tripId, int prevId, int currId, int nextId) {
-                if (!inUse) return;
-                long move = hashMove(tripId, prevId, currId, nextId);
-                removalQ.addLast(move);
-                if (removalQ.size() > tabuMemory) {
-                    long oldMove = removalQ.removeFirst();
-                    banned.remove(oldMove);
-                }
-                banned.add(move);
-            }
-
-            private long hashMove(int tripId, int prevId, int currId, int nextId) {
-                long hash = 0;
-                hash += tripId;
-                hash += 1000L * (prevId-1);
-                hash += 10000000L * (currId-1);
-                hash += 100000000000L * (nextId-1);
-                return hash;
-            }
-
-        }
 
 
 
@@ -903,12 +844,6 @@ public class A {
 
 
 
-
-        int endId;
-        double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
-        int[] w;
-        long sumOfAllWeights;
-        double[][] dist;
 
         void readInput() throws FileNotFoundException {
             System.out.println("Reading input...");
@@ -949,8 +884,6 @@ public class A {
 
             scanner.close();
         }
-
-        Set<Integer> challengingNodes = new HashSet<>();
 
         void readChallengingNodes() throws FileNotFoundException {
             System.out.println("Reading challenging nodes...");
@@ -1139,6 +1072,12 @@ public class A {
             }
         }
 
+        void addEmptyTrips() {
+            // These provide some flexibility when moving between solutions
+            trips.add(new Trip());
+            trips.add(new Trip());
+        }
+
         void resetTrips() {
             nextFreeTripId = 0;
             trips = new ArrayList<>();
@@ -1324,7 +1263,7 @@ public class A {
         }
 
         void periodicals() {
-            periodicallyAdjustTemperatureUpwardsIfStalled();
+            periodicallyShakeIfNeeded();
             periodicallyCoolDownTabuSearch();
             periodicallyReportScore();
             periodicallySave();
@@ -1362,7 +1301,59 @@ public class A {
             return t;
         }
 
-        long lastTimeCheckedTabuSearchChooling = 0;
+
+
+
+        void randomRouteTabuSearch() {
+            createBadRouteRandomly();
+            tabuSearch = new TabuSearch(true);
+            while (true) {
+                periodicals();
+                proposeRandomSteal();
+                proposeRandomSwap();
+            }
+        }
+
+        class TabuSearch {
+            boolean inUse;
+            Deque<Long> removalQ;
+            HashSet<Long> banned;
+            int[] tabuCounts;
+
+            public TabuSearch(boolean inUse) {
+                this.inUse = inUse;
+                removalQ = new ArrayDeque<>();
+                banned = new HashSet<>();
+                tabuCounts = new int[2];
+            }
+
+            boolean banned(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return false;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                return banned.contains(move);
+            }
+
+            void add(int tripId, int prevId, int currId, int nextId) {
+                if (!inUse) return;
+                long move = hashMove(tripId, prevId, currId, nextId);
+                removalQ.addLast(move);
+                if (removalQ.size() > tabuMemory) {
+                    long oldMove = removalQ.removeFirst();
+                    banned.remove(oldMove);
+                }
+                banned.add(move);
+            }
+
+            private long hashMove(int tripId, int prevId, int currId, int nextId) {
+                long hash = 0;
+                hash += tripId;
+                hash += 1000L * (prevId-1);
+                hash += 10000000L * (currId-1);
+                hash += 100000000000L * (nextId-1);
+                return hash;
+            }
+
+        }
 
         void periodicallyCoolDownTabuSearch() {
             long now = System.currentTimeMillis();
@@ -1375,6 +1366,12 @@ public class A {
                 desiredTabuAccProportion *= 0.999;
             }
         }
+
+
+
+
+
+
 
         void printStatus() {
             long now = System.currentTimeMillis();
