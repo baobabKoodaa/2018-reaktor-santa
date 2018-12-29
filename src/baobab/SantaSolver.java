@@ -10,7 +10,7 @@ public class SantaSolver {
     // Constants from problem statement
     double SANTA_HOME_LATITUDE = 68.073611;
     double SANTA_HOME_LONGITUDE = 29.315278;
-    int MAX_TRIP_WEIGHT = 10000000;
+    int REAL_MAX_TRIP_WEIGHT = 10000000;
 
     // Input will be read into these variables
     int endId;
@@ -38,29 +38,40 @@ public class SantaSolver {
     double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
     boolean enableLocalWalk = true;
 
-    // Hyperparameters for simulated annealing
-    boolean usingSA = false;
+    // Simulated annealing
+    boolean SA_IN_USE = false;
     double maxTemperature = 10000000.0;
     double temperature = maxTemperature;
     double coolingRate = 0.9999999;
     double coolingReduction = 0.015;
 
-    // Hyperparameters for freeze condition / shaking
+    // Freeze condition / shaking
     long freezeCheckLastTime = 0;
-    long freezeCheckIntervalSeconds = 45;
+    long freezeCheckIntervalSeconds = 81;
     double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
     double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
-    double freezeCheckMinimumDiff = 1000000;
+    double freezeCheckMinimumDiff = 500000;
     double freezeConditionTemperatureMultiplier = 2;
 
+    // Overfill (solution space expansion)
+    int maxTripWeight = REAL_MAX_TRIP_WEIGHT;
+    double PEAK_OVERFILL = 1.5;
+    double currOverfill = 1.0;
+    int overfillStatus = 0;
+    static int NO_OVERFILL = 0;
+    static int OVERFILL_WEIGHT_EXPANSION = 1;
+    static int OVERFILL_PENALTY_EXPANSION = 2;
+    double initialOverfillPenalty = 1;
+    double overfillPenalty = 0;
+    double overfillPenaltyModifier = 1.03;
+
     // Reduce print spam
-    boolean verbose = true;
+    boolean verbose = false;
     double lastPrintedScore = Double.POSITIVE_INFINITY;
     double lowestKnownScore = Double.POSITIVE_INFINITY;
     long startTime = System.currentTimeMillis();
     long timeWhenBestScoreReached = startTime;
     long lastScorePrintTime = 0;
-    long printIntervalSeconds = 1;
     double lastPval;
     double lastPvalProposalVal;
     int[] SAcount = new int[2];
@@ -72,6 +83,8 @@ public class SantaSolver {
     double bestSavedScore = 7900000000.0;
     double lastScoreSaveTime = 0;
     double saveIntervalSeconds = 120;
+    String filePathToBestSavedSolution;
+    double bestLoadedScore;
 
     // Auxiliary
     Random rng;
@@ -102,9 +115,9 @@ public class SantaSolver {
     // TODO optimize-the-fuck-out-of-a-final-solution (TSP solver)
     // TODO testaa onko yksittäisissä tripeissä ~2% optimoitavaa? esim. bruteta 7-10 kokoset ja katso parannus
 
-    // TODO detachment mutta reattachin sijaan heitetään kaikki irrotetut johonkin uuteen trippiin/trippeihin
+    // TODO klusteroinnissa minDist sijaan kauimpana olevat? (niistä jotka on maxSparsityn sisällä)
 
-    // TODO SA restartteja lämpötilaa nostamalla
+    // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
 
     void randomRouteHillClimb() {
         createBadRouteRandomly();
@@ -117,7 +130,7 @@ public class SantaSolver {
 
     void randomRouteSimulatedAnnealing() {
         createBadRouteRandomly();
-        usingSA = true;
+        SA_IN_USE = true;
         while (true) {
             periodicals();
             proposeRandomSwap();
@@ -127,7 +140,7 @@ public class SantaSolver {
 
     void jumpStartSimulatedAnnealing() {
         createRouteFromScratch();
-        usingSA = true;
+        SA_IN_USE = true;
         temperature = 13000;
         while (true) {
             periodicals();
@@ -137,7 +150,7 @@ public class SantaSolver {
     }
 
     void periodicallyShakeIfNeeded() {
-        if (!usingSA)
+        if (!SA_IN_USE)
             return;
         long now = System.currentTimeMillis();
         if (freezeCheckLastTime == 0) {
@@ -150,8 +163,8 @@ public class SantaSolver {
             return;
         }
         if (shakingNeeded()) {
-            System.out.println("Freeze condition detected. Shaking solution...");
-            shake();
+            System.out.print("Freeze condition detected. ");
+            shakeByOverfill();
             //oldShake();
         }
 
@@ -162,6 +175,10 @@ public class SantaSolver {
     }
 
     boolean shakingNeeded() {
+        if (overfillStatus != NO_OVERFILL) {
+            // Previous shaking (by method of overfill) still going on
+            return false;
+        }
         double min = minScoreSinceLastFreezeCheck;
         double max = maxScoreSinceLastFreezeCheck;
         double diff = max - min;
@@ -169,22 +186,25 @@ public class SantaSolver {
         return (diff < freezeCheckMinimumDiff);
     }
 
-    void shake() {
-        temperature *= freezeConditionTemperatureMultiplier;
+    void shakeByOverfill() {
+        System.out.println("Shaking by overfill...");
+        overfillStatus = OVERFILL_WEIGHT_EXPANSION;
+        updateOverfill(); // and every 1 second along with status prints
     }
 
     void oldShake() {
+        System.out.println("Shaking by jumping temperature upwards...");
         temperature *= freezeConditionTemperatureMultiplier;
-        probabilisticDetachment();
+        //probabilisticDetachment();
     }
 
     void foreverImproveAnExistingRoute() throws FileNotFoundException {
-        //MAX_TRIP_WEIGHT *= 1.3;
-        usingSA = true;
+        SA_IN_USE = true;
         temperature = 1000.0; // Need lower than default temperature
         Double val = loadPreviouslyFoundSolution(getFilePath("run91\\santamap1"));
-        if (val == null)
-            return;
+        periodicals();
+        shakeByOverfill();
+        if (val == null) return;
         while (true) {
             periodicals();
             //localSearchOrderOfIndividualTrips(trips);
@@ -209,13 +229,17 @@ public class SantaSolver {
         if (stop1id == stop2id)
             return;
         if (trip1 != trip2) {
-            if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT)
-                return;
-            if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT)
-                return;
+            long potentialTrip1Weight = trip1.weightSum + w[stop2id] - w[stop1id];
+            long potentialTrip2Weight = trip2.weightSum + w[stop1id] - w[stop2id];
+            if (potentialTrip1Weight > maxTripWeight) return;
+            if (potentialTrip2Weight > maxTripWeight) return;
             double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
             double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
             double proposalVal = replacementVal1 + replacementVal2;
+            if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
+                proposalVal += getOverfillVal(trip1.weightSum, potentialTrip1Weight);
+                proposalVal += getOverfillVal(trip2.weightSum, potentialTrip2Weight);
+            }
             if (acceptProposal(proposalVal)) {
                 trip1.addStop(stop1index, stop2id);
                 trip2.addStop(stop2index, stop1id);
@@ -237,26 +261,39 @@ public class SantaSolver {
     void proposeRandomSteal() {
         Trip giver = trips.get(rng.nextInt(trips.size()));
         Trip taker = trips.get(rng.nextInt(trips.size()));
-        if (giver.isEmpty())
-            return;
-        if (giver == taker)
-            return;
+        if (giver.isEmpty()) return;
+        if (giver == taker) return;
         int giverIndex = rng.nextInt(giver.size());
         int takerIndex = rng.nextInt(taker.size() + 1);
         int stealId = giver.getIdFromIndex(giverIndex);
-        if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT)
-            return;
+        long potentialTakerWeight = taker.weightSum + w[stealId];
+        if (potentialTakerWeight > maxTripWeight) return;
         double removalVal = giver.getRemovalVal(giverIndex);
         double insertionVal = taker.getInsertionVal(stealId, takerIndex);
         double proposalVal = removalVal + insertionVal;
+        if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
+            long potentialGiverWeight = giver.weightSum - w[stealId];
+            proposalVal += getOverfillVal(giver.weightSum, potentialGiverWeight);
+            proposalVal += getOverfillVal(taker.weightSum, potentialTakerWeight);
+        }
         if (acceptProposal(proposalVal)) {
             taker.addStop(takerIndex, stealId);
             giver.removeIndex(giverIndex);
         }
     }
 
+    double getOverfillVal(long oldW, long newW) {
+        if (Math.max(oldW, newW) > REAL_MAX_TRIP_WEIGHT) {
+            oldW = Math.max(oldW, REAL_MAX_TRIP_WEIGHT);
+            newW = Math.max(newW, REAL_MAX_TRIP_WEIGHT);
+            double diff = oldW - newW;
+            return diff * overfillPenalty;
+        }
+        return 0;
+    }
+
     boolean acceptProposal(double proposalVal) {
-        if (usingSA) {
+        if (SA_IN_USE) {
             if (proposalVal >= 0) return true;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
@@ -283,7 +320,7 @@ public class SantaSolver {
                 if (tripIndex >= trips.size())
                     trips.add(new Trip());
                 Trip trip = trips.get(tripIndex);
-                if (trip.weightSum + w[stop] <= MAX_TRIP_WEIGHT) {
+                if (trip.weightSum + w[stop] <= maxTripWeight) {
                     trip.addStop(stop);
                     break;
                 }
@@ -381,7 +418,7 @@ public class SantaSolver {
             int bestCandidateInsertionPos = 0;
 
             for (Trip taker : trips) {
-                if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
+                if (taker.weightSum + w[currId] > maxTripWeight)
                     continue;
                 int takerBestPos = -1;
                 double takerBestPosInsertionVal = Integer.MIN_VALUE;
@@ -467,7 +504,7 @@ public class SantaSolver {
 
     boolean transferIndex(int index, Trip giver, Trip taker) {
         int currId = giver.getIdFromIndex(index);
-        if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
+        if (taker.weightSum + w[currId] > maxTripWeight)
             return false;
         int prevId = giver.getIdFromIndex(index - 1);
         int nextId = giver.getIdFromIndex(index + 1);
@@ -503,7 +540,7 @@ public class SantaSolver {
     }
 
     void createRouteFromScratch() {
-        System.out.println("Creating route from scratch... " + (verbose ? "\n" : ""));
+        System.out.print("Creating route from scratch... " + (verbose ? "\n" : ""));
 
         // Init
         resetTrips();
@@ -564,7 +601,7 @@ public class SantaSolver {
         int currId = candidates.get(candidates.size() - 1);
         currTrip.addStop(currId);
 
-        double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
+        double goal = UTZ_CLUSTER_GOAL * maxTripWeight;
         while (true) {
             boolean change = false;
             for (int candidateId : candidates) {
@@ -704,7 +741,7 @@ public class SantaSolver {
                     continue;
 
                 // Does candidate fit within weight bounds?
-                if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT)
+                if (currTrip.weightSum + w[candidateId] > maxTripWeight)
                     continue;
 
                 // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
@@ -720,7 +757,7 @@ public class SantaSolver {
                 double heuristicVal = sparsity;
 
                 // Add random to heuristic in order to explore many different options for this trip as this function is called many times
-                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
+                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * maxTripWeight) {
                     // Add random unless we are able to "complete" a trip with this stop
                     heuristicVal *= (1 + randomSize * rng.nextDouble());
                 }
@@ -754,7 +791,7 @@ public class SantaSolver {
             int candidateId = candidates.get(candidateIndex);
             if (currTrip.used[candidateId])
                 continue;
-            if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT)
+            if (currTrip.weightSum + w[candidateId] > maxTripWeight)
                 continue;
 
             double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
@@ -884,69 +921,9 @@ public class SantaSolver {
         }
     }
 
-    String filePathToBestSavedSolution;
-    double bestLoadedScore;
 
-    void loadAndComparePreviousSolutions() throws FileNotFoundException {
-        // Trowls through subfolders too
-        bestLoadedScore = Double.POSITIVE_INFINITY;
-        loadAndComparePreviousSolutions(OUTPUT_DIR);
-        File rootDir = new File(OUTPUT_DIR);
-        for (File file : rootDir.listFiles()) {
-            if (file.isDirectory())
-                loadAndComparePreviousSolutions(file.getPath());
-        }
-        System.out.println("Best solution i=" + filePathToBestSavedSolution + " val=" + formatAnsValue(bestLoadedScore));
-    }
 
-    void loadAndComparePreviousSolutions(String folderPath) throws FileNotFoundException {
-        for (int i = 1; ; i++) {
-            String filePath = folderPath + File.separator + "santamap" + i + ".txt";
-            if (!new File(filePath).exists())
-                break;
-            Double val = loadPreviouslyFoundSolution(filePath);
-            if (val != null && val < bestLoadedScore) {
-                bestLoadedScore = val;
-                filePathToBestSavedSolution = filePath;
-            }
-        }
-    }
 
-    String getFilePath(String fileName) {
-        return OUTPUT_DIR + File.separator + fileName + ".txt";
-    }
-
-    Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
-        System.out.print("Loading " + filePath + "... ");
-        resetTrips();
-        File f = new File(filePath);
-        if (!f.exists())
-            throw new RuntimeException("File doesn't exist: " + filePath);
-        Scanner scanner = new Scanner(f);
-        while (scanner.hasNext()) {
-            String[] line = scanner.nextLine().split(";");
-            Trip trip = new Trip();
-            try {
-                for (int i = 0; i < line.length; i++) {
-                    String element = line[i].replace(" ", "");
-                    int id = Integer.parseInt(element);
-                    trip.addStop(id);
-                }
-                trips.add(trip);
-            } catch (Exception ex) {
-                System.out.println("Exception: " + ex.toString());
-                return null;
-            }
-        }
-        addEmptyTrips();
-        if (!isSolutionValid(trips))
-            return null;
-        double val = calcScore(trips);
-        bestSavedScore = Math.min(bestSavedScore, val);
-        System.out.println("Solution value " + formatAnsValue(val));
-        return val;
-
-    }
 
     void preCalcAllDistances() throws Exception {
         System.out.println("Calculating distances...");
@@ -991,9 +968,9 @@ public class SantaSolver {
             }
             Collections.sort(neighbors);
 
-            // Loneliness of node == radius needed to cluster this node so that sum of weight >= MAX_TRIP_WEIGHT
+            // Loneliness of node == radius needed to cluster this node so that sum of weight >= maxTripWeight
             int i = 0;
-            for (int sumOfWeight = 0; sumOfWeight < MAX_TRIP_WEIGHT; i++) {
+            for (int sumOfWeight = 0; sumOfWeight < maxTripWeight; i++) {
                 sumOfWeight += neighbors.get(i).val;
             }
             int furthestNeighborInCluster = neighbors.get(i).id;
@@ -1010,59 +987,7 @@ public class SantaSolver {
         return meters;
     }
 
-    double utz(Trip trip) {
-        return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
-    }
 
-    void createSaveFolder() {
-        String folderNameStub = "run";
-        for (int nextFreeId = 1; ; nextFreeId++) {
-            saveFolderPath = OUTPUT_DIR + File.separator + folderNameStub + nextFreeId;
-            File saveFolder = new File(saveFolderPath);
-            if (!saveFolder.exists()) {
-                saveFolder.mkdir();
-                break;
-            }
-        }
-    }
-
-    void writeAnsToFile(List<Trip> trips) {
-        if (saveFolderPath == null || saveFolderPath.isEmpty()) {
-            throw new RuntimeException("Save folder not defined!");
-        }
-        if (trips.isEmpty())
-            throw new RuntimeException("Empty ans given in writeOutput call");
-        double val = calcScore(trips);
-        if (val + 0.0001 >= bestSavedScore) {
-            return;
-        }
-        bestSavedScore = val;
-
-        // Choose name for output file
-        int nextFreeId = 1;
-        String fileNameStub = "santamap";
-        String fileName;
-        while (true) {
-            fileName = saveFolderPath + File.separator + fileNameStub + nextFreeId + ".txt";
-            if (new File(fileName).exists())
-                nextFreeId++;
-            else
-                break;
-        }
-
-        System.out.println("Writing solution of value " + formatAnsValue(val) + " to " + fileName);
-        // Write solution to file
-        try (Writer writer = new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(fileName), "utf-8"))) {
-            for (Trip trip : trips) {
-                if (trip.isEmpty())
-                    continue;
-                writer.write(trip.toString() + "\n");
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
 
     void addEmptyTrips() {
         // These provide some flexibility when moving between solutions
@@ -1229,7 +1154,7 @@ public class SantaSolver {
                     return false;
                 }
             }
-            if (trip.weightSum > MAX_TRIP_WEIGHT) {
+            if (trip.weightSum > maxTripWeight) {
                 System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
                 return false;
             }
@@ -1242,21 +1167,187 @@ public class SantaSolver {
     }
 
     void periodicals() {
+        oncePerSecondUpdates();
         periodicallyShakeIfNeeded();
-        periodicallyCheckScoreAndReportStatus();
         periodicallySave();
     }
 
-    void periodicallyCheckScoreAndReportStatus() {
-        long time = System.currentTimeMillis();
-        if (time > lastScorePrintTime + printIntervalSeconds * 1000) {
+    void oncePerSecondUpdates() {
+        long timeNow = System.currentTimeMillis();
+        if (timeNow > lastScorePrintTime + 1000) {
             double scoreNow = calcScore(trips);
-            minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
-            maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
-            lastScorePrintTime = time;
+            updateFreezeCheck(scoreNow);
+            updateOverfill();
             printStatus(scoreNow);
         }
     }
+
+    void updateFreezeCheck(double scoreNow) {
+        minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
+        maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
+    }
+
+    void updateOverfill() {
+        if (overfillStatus == OVERFILL_WEIGHT_EXPANSION) {
+
+            // experimental
+            currOverfill = PEAK_OVERFILL;
+            if (averageFill(trips) < 1.3) {
+
+            //if (currOverfill < PEAK_OVERFILL) {
+                // Slowly allow trips to have more and more overfill.
+                //currOverfill += 0.01;
+                maxTripWeight = (int) (REAL_MAX_TRIP_WEIGHT * currOverfill);
+            }
+            else {
+                // Max overfill reached. Go into penalty expansion mode.
+                overfillStatus = OVERFILL_PENALTY_EXPANSION;
+                overfillPenalty = initialOverfillPenalty;
+            }
+        } else if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
+            if (countTripsWithOverfill(trips) > 0) {
+                // Slowly increase penalty for overfill.
+                overfillPenalty *= overfillPenaltyModifier;
+            } else {
+                // We have got rid of all the overfill so we can reset variables.
+                currOverfill = 1;
+                overfillStatus = NO_OVERFILL;
+                overfillPenalty = 0;
+                maxTripWeight = REAL_MAX_TRIP_WEIGHT;
+                freezeCheckLastTime = System.currentTimeMillis(); // Bumping this to avoid re-shaking too fast
+            }
+        }
+    }
+
+    int countTripsWithOverfill(List<Trip> trips) {
+        int count = 0;
+        for (Trip trip : trips) {
+            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) count++;
+        }
+        return count;
+    }
+
+    double averageFill(List<Trip> trips) {
+        long sumOfWeights = 0;
+        int countOfNonEmptyTrips = 0;
+        for (Trip trip : trips) {
+            if (trip.isEmpty()) continue;
+            sumOfWeights += trip.weightSum;
+            countOfNonEmptyTrips++;
+        }
+        double avgWeight = sumOfWeights * 1.0 / countOfNonEmptyTrips;
+        double avgFill = avgWeight / REAL_MAX_TRIP_WEIGHT;
+        return avgFill;
+    }
+
+    void printStatus(double curr) {
+        long now = System.currentTimeMillis();
+        if (overfillStatus == NO_OVERFILL) assertSolutionValid();
+        double prev = lastPrintedScore;
+        double diff = prev - curr;
+        String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
+        lastPrintedScore = curr;
+        if (curr < lowestKnownScore && overfillStatus == NO_OVERFILL) {
+            timeWhenBestScoreReached = now;
+            lowestKnownScore = curr;
+        }
+        String c = formatAnsValue(curr);
+        String d = formatAnsValue(diff);
+        String b = formatAnsValue(lowestKnownScore);
+        int moves = countMoves;
+        countMoves = 0;
+
+        String timeFromStart = formatElapsedTime(now - startTime);
+        String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
+
+        int sumSA = SAcount[0] + SAcount[1];
+        String extras = "";
+        if (SA_IN_USE) {
+            extras += "SA acceptance: " + SAcount[1] + " of " + (sumSA + " ("
+                    + formatPercent(SAcount[1] * 1.0 / sumSA) + ")")
+                    + " (Temperature " + Math.round(temperature) + ")"
+            ;
+            SAcount = new int[2];
+        }
+        if (overfillStatus != NO_OVERFILL) {
+            System.out.print("!");
+            extras += (" | ")
+                    + "Overfill in " + countTripsWithOverfill(trips) + " trips, "
+                    + "average fill " + formatPercent(averageFill(trips))
+                    + ", maxTripWeight=" + maxTripWeight
+                    + ", overfillPenalty=" + overfillPenalty;
+            ;
+        } else {
+            extras += (" | Average fill " + formatPercent(averageFill(trips)));
+        }
+        System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
+        lastScorePrintTime = now;
+    }
+
+    /********************************** FILE OPERATIONS ***************************************/
+
+    void loadAndComparePreviousSolutions() throws FileNotFoundException {
+        // Trowls through subfolders too
+        bestLoadedScore = Double.POSITIVE_INFINITY;
+        loadAndComparePreviousSolutions(OUTPUT_DIR);
+        File rootDir = new File(OUTPUT_DIR);
+        for (File file : rootDir.listFiles()) {
+            if (file.isDirectory())
+                loadAndComparePreviousSolutions(file.getPath());
+        }
+        System.out.println("Best solution i=" + filePathToBestSavedSolution + " val=" + formatAnsValue(bestLoadedScore));
+    }
+
+    void loadAndComparePreviousSolutions(String folderPath) throws FileNotFoundException {
+        for (int i = 1; ; i++) {
+            String filePath = folderPath + File.separator + "santamap" + i + ".txt";
+            if (!new File(filePath).exists())
+                break;
+            Double val = loadPreviouslyFoundSolution(filePath);
+            if (val != null && val < bestLoadedScore) {
+                bestLoadedScore = val;
+                filePathToBestSavedSolution = filePath;
+            }
+        }
+    }
+
+    String getFilePath(String fileName) {
+        return OUTPUT_DIR + File.separator + fileName + ".txt";
+    }
+
+    Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
+        System.out.print("Loading " + filePath + "... ");
+        resetTrips();
+        File f = new File(filePath);
+        if (!f.exists())
+            throw new RuntimeException("File doesn't exist: " + filePath);
+        Scanner scanner = new Scanner(f);
+        while (scanner.hasNext()) {
+            String[] line = scanner.nextLine().split(";");
+            Trip trip = new Trip();
+            try {
+                for (int i = 0; i < line.length; i++) {
+                    String element = line[i].replace(" ", "");
+                    int id = Integer.parseInt(element);
+                    trip.addStop(id);
+                }
+                trips.add(trip);
+            } catch (Exception ex) {
+                System.out.println("Exception: " + ex.toString());
+                return null;
+            }
+        }
+        addEmptyTrips();
+        if (!isSolutionValid(trips))
+            return null;
+        double val = calcScore(trips);
+        bestSavedScore = Math.min(bestSavedScore, val);
+        System.out.println("Solution value " + formatAnsValue(val));
+        return val;
+
+    }
+
+    /* SAVE */
 
     void periodicallySave() {
         long time = System.currentTimeMillis();
@@ -1264,6 +1355,64 @@ public class SantaSolver {
             lastScoreSaveTime = time;
             writeAnsToFile(trips);
         }
+    }
+
+    void createSaveFolder() {
+        String folderNameStub = "run";
+        for (int nextFreeId = 1; ; nextFreeId++) {
+            saveFolderPath = OUTPUT_DIR + File.separator + folderNameStub + nextFreeId;
+            File saveFolder = new File(saveFolderPath);
+            if (!saveFolder.exists()) {
+                saveFolder.mkdir();
+                break;
+            }
+        }
+    }
+
+    void writeAnsToFile(List<Trip> trips) {
+        if (saveFolderPath == null || saveFolderPath.isEmpty()) {
+            throw new RuntimeException("Save folder not defined!");
+        }
+        if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
+        if (overfillStatus != NO_OVERFILL) return; // Don't save until we are back to a valid solution
+        if (!isSolutionValid(trips)) throw new RuntimeException("Attempted to save invalid solution.");
+        double val = calcScore(trips);
+        if (val + 0.0001 >= bestSavedScore) {
+            return;
+        }
+        bestSavedScore = val;
+
+        // Choose name for output file
+        int nextFreeId = 1;
+        String fileNameStub = "santamap";
+        String fileName;
+        while (true) {
+            fileName = saveFolderPath + File.separator + fileNameStub + nextFreeId + ".txt";
+            if (new File(fileName).exists()) nextFreeId++;
+            else break;
+        }
+
+        System.out.println("Writing solution of value " + formatAnsValue(val) + " to " + fileName);
+        // Write solution to file
+        try (Writer writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(fileName), "utf-8"))) {
+            for (Trip trip : trips) {
+                if (trip.isEmpty()) continue;
+                writer.write(trip.toString() + "\n");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /********************************** UTILITIES ***************************************/
+
+    double utz(Trip trip) {
+        return 1.0 * trip.weightSum / maxTripWeight;
+    }
+
+    String formatAnsValue(double val) {
+        NumberFormat formatter = new DecimalFormat("#0.0000");
+        return formatter.format(val / 1e9);
     }
 
     String formatElapsedTime(long diff) {
@@ -1285,42 +1434,7 @@ public class SantaSolver {
         return t;
     }
 
-
-    void printStatus(double curr) {
-        long now = System.currentTimeMillis();
-        assertSolutionValid();
-        double prev = lastPrintedScore;
-        double diff = prev - curr;
-        String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
-        lastPrintedScore = curr;
-        if (curr < lowestKnownScore) {
-            timeWhenBestScoreReached = now;
-            lowestKnownScore = curr;
-        }
-        String c = formatAnsValue(curr);
-        String d = formatAnsValue(diff);
-        String b = formatAnsValue(lowestKnownScore);
-        int moves = countMoves;
-        countMoves = 0;
-
-        String timeFromStart = formatElapsedTime(now - startTime);
-        String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
-
-        int sumSA = SAcount[0] + SAcount[1];
-        String extras = "";
-        if (usingSA) {
-            extras += "SA acceptance: " + SAcount[1] + " of " + (sumSA + " (" + formatProb(SAcount[1] * 1.0 / sumSA) + ")");
-            SAcount = new int[2];
-        }
-        System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves)       " + extras);
-    }
-
-    String formatAnsValue(double val) {
-        NumberFormat formatter = new DecimalFormat("#0.000");
-        return formatter.format(val / 1e9);
-    }
-
-    String formatProb(double val) {
+    String formatPercent(double val) {
         return "" + Math.round(1000000.0 * val) / 1000000.0;
     }
 
