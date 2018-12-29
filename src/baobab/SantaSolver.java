@@ -48,9 +48,9 @@ public class SantaSolver {
     // Hyperparameters for freeze condition / shaking
     long freezeCheckLastTime = 0;
     long freezeCheckIntervalSeconds = 180;
-    double lowestKnownScoreDuringCurrentFreezeCheckInterval = Double.POSITIVE_INFINITY;
-    double lowestKnownScoreDuringPreviousFreezeCheckInterval = Double.POSITIVE_INFINITY;
-    double freezeCheckExpectedScoreImprovement = 500000;
+    double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
+    double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
+    double freezeCheckMinimumDiff = 500000;
     double freezeConditionTemperatureMultiplier = 2;
 
     // Tabu search
@@ -162,16 +162,19 @@ public class SantaSolver {
             shake();
             //oldShake();
         }
+
+        double scoreNow = calcScore(trips);
+        minScoreSinceLastFreezeCheck = scoreNow;
+        maxScoreSinceLastFreezeCheck = scoreNow;
         freezeCheckLastTime = now;
-        lowestKnownScoreDuringPreviousFreezeCheckInterval = lowestKnownScoreDuringCurrentFreezeCheckInterval;
-        lowestKnownScoreDuringCurrentFreezeCheckInterval = calcScore(trips);
     }
 
     boolean shakingNeeded() {
-        double curr = lowestKnownScoreDuringCurrentFreezeCheckInterval;
-        double prev = lowestKnownScoreDuringPreviousFreezeCheckInterval;
-        double improvement = curr - prev;
-        return (improvement < freezeCheckExpectedScoreImprovement);
+        double min = minScoreSinceLastFreezeCheck;
+        double max = maxScoreSinceLastFreezeCheck;
+        double diff = max - min;
+        System.out.println("Checking for freeze condition... diff " + diff);
+        return (diff < freezeCheckMinimumDiff);
     }
 
     void shake() {
@@ -284,19 +287,15 @@ public class SantaSolver {
                 return false;
             }
         } else if (usingSA) {
-            if (proposalVal >= 0)
-                return true;
+            if (proposalVal >= 0) return true;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
             lastPvalProposalVal = proposalVal;
             if (rng.nextDouble() < coolingReduction)
                 temperature *= coolingRate;
             boolean accepted = (P >= rng.nextDouble());
-            if (accepted) {
-                SAcount[1]++;
-                lowestKnownScoreDuringCurrentFreezeCheckInterval++;
-            } else
-                SAcount[0]++;
+            if (accepted) SAcount[1]++;
+            else SAcount[0]++;
             return accepted;
         } else {
             // Default: hill climb.
@@ -1304,7 +1303,8 @@ public class SantaSolver {
         long time = System.currentTimeMillis();
         if (time > lastScorePrintTime + printIntervalSeconds * 1000) {
             double scoreNow = calcScore(trips);
-            lowestKnownScoreDuringCurrentFreezeCheckInterval = Math.min(scoreNow, lowestKnownScoreDuringCurrentFreezeCheckInterval);
+            minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
+            maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
             lastScorePrintTime = time;
             printStatus(scoreNow);
         }
