@@ -107,7 +107,11 @@ public class SantaSolver {
     // TODO GA trip plucking
 
     void livenessExperiment() {
+        createBadRouteRandomly();
+        double meters = calcScore(trips);
+        while (true) {
 
+        }
     }
 
     void hillClimbRandomRoute() {
@@ -204,14 +208,12 @@ public class SantaSolver {
     }
 
     void reorderingExperiment() {
-        double before = 0;
+        System.out.println("Trying to shuffle individual trip orders with reordering experiment...");
         for (Trip trip : trips) {
             if (trip.isEmpty()) continue;
-            before += trip.updateMeters();
+            trip.updateMeters();
             tryToReorder(trip);
         }
-        double after = calcScore(trips);
-        System.out.println("Reordering experiment yielded gains of " + formatAnsValue(before-after));
     }
 
     void tryToReorder(Trip trip) {
@@ -237,7 +239,7 @@ public class SantaSolver {
             double meters = - rng.nextInt(50000); // Slightly randomize and favor new solutions
             List<Integer> order = new ArrayList<>();
             for (int j=0; j<trip.size(); j++) {
-                // Create likelihoods for picking any of top 4 candidates
+                // Create likelihoods for picking any of top candidates
                 double sum = 0;
                 List<IDval> topCandidates = new ArrayList<>(4);
                 for (int k=0; k<trip.size(); k++) {
@@ -252,14 +254,12 @@ public class SantaSolver {
                     double oppositeVal = sum - candidate.val;
                     adjustedSum += oppositeVal;
                 }
-                // Move to 1 of top 5 candidates
+                // Move to 1 of top candidates
                 double decisionThreshold = rng.nextDouble() * adjustedSum * 0.999999999;
-                boolean choseCandidate = false;
                 for (int k=0; k<topCandidates.size(); k++) {
                     IDval candidate = topCandidates.get(k);
                     double oppositeVal = sum-candidate.val;
                     if (decisionThreshold <= oppositeVal) {
-                        choseCandidate = true;
                         used[candidate.id] = true;
                         meters += dist[prevId][candidate.id];
                         order.add(candidate.id);
@@ -267,9 +267,6 @@ public class SantaSolver {
                         break;
                     }
                     decisionThreshold -= oppositeVal;
-                }
-                if (!choseCandidate) {
-                    System.out.println("PROBLEM! topCandidates size = " +topCandidates.size());
                 }
             }
             meters += dist[order.get(order.size()-1)][1];
@@ -279,7 +276,6 @@ public class SantaSolver {
 
             // Is this the best order?
             if (meters < bestMeters) {
-                //System.out.println(trip.tripId + " Found something better! " + meters + " vs " + bestMeters);
                 bestMeters = meters;
                 bestOrder = order;
             }
@@ -608,15 +604,13 @@ public class SantaSolver {
     }
 
     void optimalStealsAsLongAsPossible() {
-        long lastSaveTime = System.currentTimeMillis();
         while (true) {
             boolean alive = false;
             for (Trip taker : trips) {
                 while (true) {
                     boolean takerImproved = false;
                     for (Trip giver : trips) {
-                        if (taker == giver)
-                            continue;
+                        if (taker == giver) continue;
                         for (int i = 0; i < giver.size(); i++) {
                             if (transferIndex(i, giver, taker)) {
                                 periodicals();
@@ -624,15 +618,12 @@ public class SantaSolver {
                             }
                         }
                     }
-                    if (!takerImproved)
-                        break;
-                    else
-                        alive = true;
+                    if (!takerImproved) break;
+                    else alive = true;
                 }
             }
 
-            if (!alive)
-                return;
+            if (!alive) return;
         }
     }
 
@@ -944,10 +935,8 @@ public class SantaSolver {
 
     // This method will local walk the order within a single trip to a local optima.
     void localSearchOrderOfIndividualTrip(Trip trip) {
-        if (!enableLocalWalk)
-            return;
-        if (trip.isEmpty())
-            return;
+        if (!enableLocalWalk) return;
+        if (trip.isEmpty()) return;
         int n = trip.size();
         int fromIndex = 0;
         for (int countWithoutUpdate = 0; countWithoutUpdate <= n; ) {
@@ -972,142 +961,15 @@ public class SantaSolver {
                 countWithoutUpdate++;
             } else {
                 countWithoutUpdate = 0;
+                // Note: atypical way of modifying a trip. Careful with introducing bugs here!
                 trip.ids.add(bestIndex, id);
-                if (bestIndex > fromIndex)
-                    trip.ids.remove(fromIndex);
-                else
-                    trip.ids.remove(fromIndex + 1);
+                if (bestIndex > fromIndex) trip.ids.remove(fromIndex);
+                else trip.ids.remove(fromIndex + 1);
             }
 
             fromIndex = (bestIndex + 1) % n;
         }
     }
-
-
-    void readInput() throws FileNotFoundException {
-        System.out.println("Reading input...");
-
-        // Find max id
-        endId = Integer.MIN_VALUE;
-        Scanner scanner = new Scanner(new File("input.txt"));
-        while (scanner.hasNext()) {
-            String[] line = scanner.nextLine().split(";");
-            int id = Integer.parseInt(line[0]);
-            endId = Math.max(endId, id + 1);
-        }
-        scanner.close();
-
-        // Read file to memory
-        c = new double[endId][2];
-        w = new int[endId];
-        sumOfAllWeights = 0;
-        scanner = new Scanner(new File("input.txt"));
-        while (scanner.hasNext()) {
-            String[] line = scanner.nextLine().split(";");
-            int id = Integer.parseInt(line[0]);
-            double c1 = Double.parseDouble(line[1]);
-            double c2 = Double.parseDouble(line[2]);
-            int weight = Integer.parseInt(line[3]);
-            c[id][0] = c1;
-            c[id][1] = c2;
-            w[id] = weight;
-            sumOfAllWeights += weight;
-            //System.out.println(id + ";" + c1 + ";" + c2 + ";" + weight);
-        }
-
-        // Add santa's coordinates to input at id 1
-        c[1][0] = SANTA_HOME_LATITUDE;
-        c[1][1] = SANTA_HOME_LONGITUDE;
-
-        //readChallengingNodes();
-
-        scanner.close();
-    }
-
-    void readChallengingNodes() throws FileNotFoundException {
-        System.out.println("Reading challenging nodes...");
-        challengingNodes = new HashSet<>();
-        Scanner scanner = new Scanner(new File("challenging_nodes.txt"));
-        while (scanner.hasNext()) {
-            String line = scanner.nextLine();
-            String[] sep = line.split(" ");
-            try {
-                int id = Integer.parseInt(sep[sep.length - 1]);
-                int tripNum = Integer.parseInt(sep[1].substring(1));
-                if (tripNum < 500)
-                    challengingNodes.add(id);
-            } catch (Exception ex) {
-                //System.out.println("    Skipping row " + line);
-            }
-        }
-    }
-
-
-
-
-
-    void preCalcAllDistances() throws Exception {
-        System.out.println("Calculating distances...");
-        dist = new double[endId][endId];
-        for (int id1 = 1; id1 < endId; id1++) {
-            for (int id2 = id1 + 1; id2 < endId; id2++) {
-                double distance = calcDistance(id1, id2);
-                dist[id1][id2] = distance;
-                dist[id2][id1] = distance;
-            }
-        }
-
-    }
-
-    double calcDistance(int id1, int id2) {
-        // Adapted from https://www.movable-type.co.uk/scripts/latlong.html
-        double R = 6378000; // assumed radius of Earth in meters
-        double lat1 = c[id1][0];
-        double lat2 = c[id2][0];
-        double lon1 = c[id1][1];
-        double lon2 = c[id2][1];
-        double phi1 = Math.toRadians(lat1);
-        double phi2 = Math.toRadians(lat2);
-        double deltaPhi = Math.toRadians(lat2 - lat1);
-        double deltaLambda = Math.toRadians(lon2 - lon1);
-        double sinPhi = Math.sin(deltaPhi / 2);
-        double sinLambda = Math.sin(deltaLambda / 2);
-        double a = sinPhi * sinPhi + Math.cos(phi1) * Math.cos(phi2) * sinLambda * sinLambda;
-        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c;
-    }
-
-    double[] getLoneliness() {
-        double[] loneliness = new double[endId];
-        for (int id = 2; id < endId; id++) {
-            // Sort everyone according to dist to id
-            List<IDval> neighbors = new ArrayList<>();
-            for (int neighbor = 2; neighbor < endId; neighbor++) {
-                if (neighbor == id)
-                    continue;
-                neighbors.add(new IDval(neighbor, dist[id][neighbor]));
-            }
-            Collections.sort(neighbors);
-
-            // Loneliness of node == radius needed to cluster this node so that sum of weight >= maxTripWeight
-            int i = 0;
-            for (int sumOfWeight = 0; sumOfWeight < REAL_MAX_TRIP_WEIGHT; i++) {
-                sumOfWeight += neighbors.get(i).val;
-            }
-            int furthestNeighborInCluster = neighbors.get(i).id;
-            loneliness[id] = dist[id][furthestNeighborInCluster];
-        }
-        return loneliness;
-    }
-
-    double calcScore(List<Trip> trips) {
-        double meters = 0;
-        for (Trip trip : trips) {
-            meters += trip.updateMeters();
-        }
-        return meters;
-    }
-
 
 
     void addEmptyTrips() {
@@ -1261,31 +1123,7 @@ public class SantaSolver {
         }
     }
 
-    void assertSolutionValid() {
-        if (!isSolutionValid(trips))
-            throw new RuntimeException("Solution invalid!");
-    }
 
-    boolean isSolutionValid(List<Trip> trips) {
-        HashSet<Integer> validityCheck = new HashSet<>();
-        for (Trip trip : trips) {
-            for (int id : trip.ids) {
-                if (!validityCheck.add(id)) {
-                    System.out.println("Invalid solution! Id " + id + " appears twice!");
-                    return false;
-                }
-            }
-            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) {
-                System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
-                return false;
-            }
-        }
-        if (validityCheck.size() != endId - 2) {
-            System.out.println("Invalid solution! Expected " + (endId - 2) + " stops, but actual was " + validityCheck.size());
-            return false;
-        }
-        return true;
-    }
 
     void periodicals() {
         oncePerSecondUpdates();
@@ -1305,19 +1143,6 @@ public class SantaSolver {
     void updateFreezeCheck(double scoreNow) {
         minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
         maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
-    }
-
-    double averageFill(List<Trip> trips) {
-        long sumOfWeights = 0;
-        int countOfNonEmptyTrips = 0;
-        for (Trip trip : trips) {
-            if (trip.isEmpty()) continue;
-            sumOfWeights += trip.weightSum;
-            countOfNonEmptyTrips++;
-        }
-        double avgWeight = sumOfWeights * 1.0 / countOfNonEmptyTrips;
-        double avgFill = avgWeight / REAL_MAX_TRIP_WEIGHT;
-        return avgFill;
     }
 
     void printStatus(double curr) {
@@ -1354,6 +1179,64 @@ public class SantaSolver {
     }
 
     /********************************** FILE OPERATIONS ***************************************/
+
+    void readInput() throws FileNotFoundException {
+        System.out.println("Reading input...");
+
+        // Find max id
+        endId = Integer.MIN_VALUE;
+        Scanner scanner = new Scanner(new File("input.txt"));
+        while (scanner.hasNext()) {
+            String[] line = scanner.nextLine().split(";");
+            int id = Integer.parseInt(line[0]);
+            endId = Math.max(endId, id + 1);
+        }
+        scanner.close();
+
+        // Read file to memory
+        c = new double[endId][2];
+        w = new int[endId];
+        sumOfAllWeights = 0;
+        scanner = new Scanner(new File("input.txt"));
+        while (scanner.hasNext()) {
+            String[] line = scanner.nextLine().split(";");
+            int id = Integer.parseInt(line[0]);
+            double c1 = Double.parseDouble(line[1]);
+            double c2 = Double.parseDouble(line[2]);
+            int weight = Integer.parseInt(line[3]);
+            c[id][0] = c1;
+            c[id][1] = c2;
+            w[id] = weight;
+            sumOfAllWeights += weight;
+            //System.out.println(id + ";" + c1 + ";" + c2 + ";" + weight);
+        }
+
+        // Add santa's coordinates to input at id 1
+        c[1][0] = SANTA_HOME_LATITUDE;
+        c[1][1] = SANTA_HOME_LONGITUDE;
+
+        //readChallengingNodes();
+
+        scanner.close();
+    }
+
+    void readChallengingNodes() throws FileNotFoundException {
+        System.out.println("Reading challenging nodes...");
+        challengingNodes = new HashSet<>();
+        Scanner scanner = new Scanner(new File("challenging_nodes.txt"));
+        while (scanner.hasNext()) {
+            String line = scanner.nextLine();
+            String[] sep = line.split(" ");
+            try {
+                int id = Integer.parseInt(sep[sep.length - 1]);
+                int tripNum = Integer.parseInt(sep[1].substring(1));
+                if (tripNum < 500)
+                    challengingNodes.add(id);
+            } catch (Exception ex) {
+                //System.out.println("    Skipping row " + line);
+            }
+        }
+    }
 
     void loadAndComparePreviousSolutions() throws FileNotFoundException {
         // Trowls through subfolders too
@@ -1474,6 +1357,94 @@ public class SantaSolver {
 
     /********************************** UTILITIES ***************************************/
 
+    void assertSolutionValid() {
+        if (!isSolutionValid(trips))
+            throw new RuntimeException("Solution invalid!");
+    }
+
+    boolean isSolutionValid(List<Trip> trips) {
+        HashSet<Integer> validityCheck = new HashSet<>();
+        for (Trip trip : trips) {
+            for (int id : trip.ids) {
+                if (!validityCheck.add(id)) {
+                    System.out.println("Invalid solution! Id " + id + " appears twice!");
+                    return false;
+                }
+            }
+            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) {
+                System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
+                return false;
+            }
+        }
+        if (validityCheck.size() != endId - 2) {
+            System.out.println("Invalid solution! Expected " + (endId - 2) + " stops, but actual was " + validityCheck.size());
+            return false;
+        }
+        return true;
+    }
+
+    void preCalcAllDistances() throws Exception {
+        System.out.println("Calculating distances...");
+        dist = new double[endId][endId];
+        for (int id1 = 1; id1 < endId; id1++) {
+            for (int id2 = id1 + 1; id2 < endId; id2++) {
+                double distance = calcDistance(id1, id2);
+                dist[id1][id2] = distance;
+                dist[id2][id1] = distance;
+            }
+        }
+
+    }
+
+    double calcDistance(int id1, int id2) {
+        // Adapted from https://www.movable-type.co.uk/scripts/latlong.html
+        double R = 6378000; // assumed radius of Earth in meters
+        double lat1 = c[id1][0];
+        double lat2 = c[id2][0];
+        double lon1 = c[id1][1];
+        double lon2 = c[id2][1];
+        double phi1 = Math.toRadians(lat1);
+        double phi2 = Math.toRadians(lat2);
+        double deltaPhi = Math.toRadians(lat2 - lat1);
+        double deltaLambda = Math.toRadians(lon2 - lon1);
+        double sinPhi = Math.sin(deltaPhi / 2);
+        double sinLambda = Math.sin(deltaLambda / 2);
+        double a = sinPhi * sinPhi + Math.cos(phi1) * Math.cos(phi2) * sinLambda * sinLambda;
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
+
+    double[] getLoneliness() {
+        double[] loneliness = new double[endId];
+        for (int id = 2; id < endId; id++) {
+            // Sort everyone according to dist to id
+            List<IDval> neighbors = new ArrayList<>();
+            for (int neighbor = 2; neighbor < endId; neighbor++) {
+                if (neighbor == id)
+                    continue;
+                neighbors.add(new IDval(neighbor, dist[id][neighbor]));
+            }
+            Collections.sort(neighbors);
+
+            // Loneliness of node == radius needed to cluster this node so that sum of weight >= maxTripWeight
+            int i = 0;
+            for (int sumOfWeight = 0; sumOfWeight < REAL_MAX_TRIP_WEIGHT; i++) {
+                sumOfWeight += neighbors.get(i).val;
+            }
+            int furthestNeighborInCluster = neighbors.get(i).id;
+            loneliness[id] = dist[id][furthestNeighborInCluster];
+        }
+        return loneliness;
+    }
+
+    double calcScore(List<Trip> trips) {
+        double meters = 0;
+        for (Trip trip : trips) {
+            meters += trip.updateMeters();
+        }
+        return meters;
+    }
+
     double utz(Trip trip) {
         return 1.0 * trip.weightSum / REAL_MAX_TRIP_WEIGHT;
     }
@@ -1589,6 +1560,19 @@ public class SantaSolver {
             q.add(taker);
         }
         System.out.println("SUCCESS!");
+    }
+
+    double averageFill(List<Trip> trips) {
+        long sumOfWeights = 0;
+        int countOfNonEmptyTrips = 0;
+        for (Trip trip : trips) {
+            if (trip.isEmpty()) continue;
+            sumOfWeights += trip.weightSum;
+            countOfNonEmptyTrips++;
+        }
+        double avgWeight = sumOfWeights * 1.0 / countOfNonEmptyTrips;
+        double avgFill = avgWeight / REAL_MAX_TRIP_WEIGHT;
+        return avgFill;
     }
 
 }
