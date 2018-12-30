@@ -34,7 +34,7 @@ public class SantaSolver {
     double randomSize = 0.58; // Optimal around 0.58
     double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
     double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
-    double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
+    double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower
 
     // Simulated annealing
     boolean SA_IN_USE = false;
@@ -43,7 +43,7 @@ public class SantaSolver {
     double temperatureAtOldValley = 1000;
     double temperature = temperatureAtRandomStart;
     double coolingRate = 0.9999999;
-    double coolingReduction = 0.001;
+    double coolingReduction = 0.007;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
@@ -55,7 +55,7 @@ public class SantaSolver {
     boolean REORDER_EXPERIMENT = true;
 
     // Reduce print spam
-    boolean verbose = false;
+    boolean verbose = true;
     double lastPrintedScore = Double.POSITIVE_INFINITY;
     double lowestKnownScore = Double.POSITIVE_INFINITY;
     long startTime = System.currentTimeMillis();
@@ -63,8 +63,6 @@ public class SantaSolver {
     long lastScorePrintTime = 0;
     double lastPval;
     double lastPvalProposalVal;
-    int[] SAcount = new int[2];
-    int countMoves = 0;
 
     // Reduce file spam
     String OUTPUT_DIR = "outputs";
@@ -104,50 +102,87 @@ public class SantaSolver {
     // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
 
     void livenessExperiment() {
+        //createBadRouteRandomly();
+        createRouteFromScratch();
         SA_IN_USE = true;
+        temperature = temperatureAtJumpStart;
+        long X = 10000;
         while (true) {
-            temperature = temperatureAtRandomStart;
-            createBadRouteRandomly();
             double meters = sol.calcScore();
+            double metersBeforeFork = meters;
             printStatus(meters);
+            periodicallySave();
 
-            // Set goal based on how far a single fork gets in X seconds
-            long X = 10;
-            long firstForkEndTime = System.currentTimeMillis() + X*1000;
+            double temperatureBeforeFork = temperature;
+            Solution beforeFork = sol.getCopy();
+
+            // Run first fork here to set goalMeters based on how far a single fork gets in X milliseconds.
+            long firstForkEndTime = System.currentTimeMillis() + X;
             while (System.currentTimeMillis() < firstForkEndTime) {
-                for (int i=0; i<10000; i++) {
+                for (int i=0; i<50000; i++) {
                     tryToExecuteRandomSteal();
                     tryToExecuteRandomSwap();
                 }
             }
-            double goalMeters = sol.calcScore();
-            int bestForkLiveness = sol.calcLiveness();
-            // TODO copy current solution, set copy as bestKnownLivenessSolution
+            meters = sol.calcScore();
+            int liveness = sol.calcLiveness();
+            int bestForkLiveness = liveness;
+            Solution bestForkSolution = sol;
+            System.out.println("        Fork 1: " + formatAnsValue(meters) + " meters " + liveness + " liveness, goaltime: " + formatElapsedTime(X));
+            double goalMeters = meters;
 
-            // TODO lisää statusprinttiin liveness ja jätä vertailuks pyörimään "normiruni"
+            // Collect statistics on forks
+            int sumOfLivenesses = bestForkLiveness;
+            int countOfAcceptableForks = 1;
 
-            for (int fork=2; fork<=10; fork++) {
+            // Run other forks until each one reaches goalMeters
+            for (int fork=2; fork<=5; fork++) {
+                sol = beforeFork.getCopy();
+                temperature = temperatureBeforeFork;
+                meters = metersBeforeFork;
+
                 long forkStartTime = System.currentTimeMillis();
-                long expectedForkEndTime = forkStartTime + X*1000;
+                long expectedForkEndTime = forkStartTime + X;
+                int countLoop = 0;
                 while (meters > goalMeters) {
-                    for (int i=0; i<10000; i++) {
+                    for (int i=0; i<50000; i++) {
                         tryToExecuteRandomSteal();
                         tryToExecuteRandomSwap();
+                        countLoop++;
                     }
-                    if (forkStartTime > 0.9 * expectedForkEndTime) {
+                    long now = System.currentTimeMillis();
+                    if (now > 0.5 * expectedForkEndTime) {
                         // Speedup by not calculating this all the time
                         meters = sol.calcScore();
+                        if (now > expectedForkEndTime+X) {
+                            // Timeout if we can't reach comparable solution in 2 times fork 1 time
+                            break;
+                        }
                     }
-                    //TODO: something somewhere with these:
-                    //randomWalk(100);
-                    //reorderingExperiment();
                 }
-                printStatus(meters);
-                sol.calcLiveness();
+                if (meters > goalMeters) {
+                    // Uncomparable (worse) solution reached despite using much more time.
+                    continue;
+                }
+                liveness = sol.calcLiveness();
+                sumOfLivenesses += liveness;
+                countOfAcceptableForks++;
+                System.out.println("        Fork " + fork + ": " + formatAnsValue(meters) + " meters " + liveness + " liveness, time spent: " + formatElapsedTime(System.currentTimeMillis() - forkStartTime) + " (looped " + countLoop + " times)");
+                if (liveness > bestForkLiveness) {
+                    bestForkLiveness = liveness;
+                    bestForkSolution = sol;
+                }
             }
 
+            // Choose best fork to continue search
+            sol = bestForkSolution;
+            System.out.println("Chose fork with liveness " + bestForkLiveness + " (average " + (sumOfLivenesses*1.0/countOfAcceptableForks) + ")");
 
+            // Shake every now and then
+            if (rng.nextDouble() < 0.1) reorderingExperiment();
 
+            // Increase fork time as going gets tougher
+            X *= 1.01;
         }
     }
 
@@ -485,8 +520,8 @@ public class SantaSolver {
             lastPvalProposalVal = proposalVal;
             if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
             boolean accepted = (P >= rng.nextDouble());
-            if (accepted) SAcount[1]++;
-            else SAcount[0]++;
+            if (accepted) sol.SAcount[1]++;
+            else sol.SAcount[0]++;
             return accepted;
         } else {
             // Default: hill climb.
@@ -496,7 +531,7 @@ public class SantaSolver {
 
 
     void createBadRouteRandomly() {
-        System.out.println("Generating a random solution from scratch...");
+        System.out.println("Generating a random solution...");
         sol = new Solution();
         List<Integer> candidates = new ArrayList<>();
         for (int candidate = 2; candidate < endId; candidate++) {
@@ -717,7 +752,7 @@ public class SantaSolver {
         double[] loneliness = getLoneliness();
         List<IDval> sortHelper = new ArrayList<>();
         for (int id = 2; id < endId; id++) {
-            double heuristicVal = dist[1][id] + rng.nextInt(100000);
+            double heuristicVal = dist[1][id] + rng.nextInt(20000);
             sortHelper.add(new IDval(id, heuristicVal));
         }
         Collections.sort(sortHelper);
@@ -1009,12 +1044,16 @@ public class SantaSolver {
     class Solution {
         List<Trip> trips;
         int nextFreeId;
+        int[] SAcount;
+        int countMoves;
 
         public Solution() {
             reset();
         }
 
         void reset() {
+            SAcount = new int[2];
+            countMoves = 0;
             trips = new ArrayList<>();
             nextFreeId = 0;
             // These provide some flexibility when moving between solutions
@@ -1038,8 +1077,28 @@ public class SantaSolver {
         }
 
         Solution getCopy() {
-            // TODO
-            return null;
+            Solution solutionCopy = new Solution();
+            solutionCopy.countMoves = this.countMoves;
+            solutionCopy.nextFreeId = this.nextFreeId;
+            solutionCopy.SAcount = new int[2];
+            solutionCopy.SAcount[0] = this.SAcount[0];
+            solutionCopy.SAcount[1] = this.SAcount[1];
+            solutionCopy.trips = new ArrayList<>();
+            for (Trip trip : this.trips) {
+                Trip copy = new Trip(trip.tripId);
+                copy.ids = new ArrayList<>();
+                for (int id : trip.ids) {
+                    copy.ids.add(id);
+                }
+                copy.meters = trip.meters;
+                copy.used = new boolean[trip.used.length];
+                for (int i=0; i<trip.used.length; i++) {
+                    copy.used[i] = trip.used[i];
+                }
+                copy.weightSum = trip.weightSum;
+                solutionCopy.trips.add(copy);
+            }
+            return solutionCopy;
         }
 
         double calcScore() {
@@ -1071,7 +1130,7 @@ public class SantaSolver {
                 }
             }
             SA_IN_USE = helper;
-            System.out.println("Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
+            System.out.println("        Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
             return accMoveCount;
         }
 
@@ -1128,7 +1187,7 @@ public class SantaSolver {
             used[id] = true;
             weightSum += w[id];
             ids.add(i, id);
-            countMoves++;
+            sol.countMoves++;
         }
 
         void removeIndex(int i) {
@@ -1273,20 +1332,20 @@ public class SantaSolver {
         String c = formatAnsValue(curr);
         String d = formatAnsValue(diff);
         String b = formatAnsValue(lowestKnownScore);
-        int moves = countMoves;
-        countMoves = 0;
+        int moves = sol.countMoves;
+        sol.countMoves = 0;
 
         String timeFromStart = formatElapsedTime(now - startTime);
         String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
 
-        int sumSA = SAcount[0] + SAcount[1];
+        int sumSA = sol.SAcount[0] + sol.SAcount[1];
         String extras = "";
         if (SA_IN_USE) {
-            extras += "SA acceptance: " + SAcount[1] + " of " + (sumSA + " ("
-                    + formatPercent(SAcount[1] * 1.0 / sumSA) + ")")
+            extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
+                    + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
                     + " (Temperature " + Math.round(temperature) + ")"
             ;
-            SAcount = new int[2];
+            sol.SAcount = new int[2];
         }
         System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
         lastScorePrintTime = now;
@@ -1469,8 +1528,7 @@ public class SantaSolver {
     /********************************** UTILITIES ***************************************/
 
     void assertSolutionValid() {
-        if (!sol.isValid())
-            throw new RuntimeException("Solution invalid!");
+        if (!sol.isValid()) throw new RuntimeException("Solution invalid!");
     }
 
     void preCalcAllDistances() throws Exception {
