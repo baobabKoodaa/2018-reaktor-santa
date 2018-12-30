@@ -20,8 +20,7 @@ public class SantaSolver {
     double[][] dist;
 
     // Current solution state
-    List<Trip> trips;
-    int nextFreeTripId;
+    Solution sol;
 
     // Route creation variables
     List<Integer> candidates;
@@ -36,7 +35,6 @@ public class SantaSolver {
     double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
     double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
     double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower and sometimes stuck at infinite loop
-    boolean enableLocalWalk = true;
 
     // Simulated annealing
     boolean SA_IN_USE = false;
@@ -107,50 +105,50 @@ public class SantaSolver {
 
     void livenessExperiment() {
         SA_IN_USE = true;
-        double goalMeters = 30000000000L;
         while (true) {
             temperature = temperatureAtRandomStart;
             createBadRouteRandomly();
-            double meters = calcScore(trips);
+            double meters = sol.calcScore();
             printStatus(meters);
 
-            while (meters > goalMeters) {
-                for (int i=0; i<50000; i++) {
+            // Set goal based on how far a single fork gets in X seconds
+            long X = 10;
+            long firstForkEndTime = System.currentTimeMillis() + X*1000;
+            while (System.currentTimeMillis() < firstForkEndTime) {
+                for (int i=0; i<10000; i++) {
                     tryToExecuteRandomSteal();
                     tryToExecuteRandomSwap();
                 }
-                meters = calcScore(trips);
-                //randomWalk(100);
-                //reorderingExperiment();
             }
-            printStatus(meters);
-            calcLiveness(trips);
-        }
-    }
+            double goalMeters = sol.calcScore();
+            int bestForkLiveness = sol.calcLiveness();
+            // TODO copy current solution, set copy as bestKnownLivenessSolution
 
-    int calcLiveness(List<Trip> trips) {
-        boolean helper = SA_IN_USE;
-        SA_IN_USE = false;
-        int accMoveCount = 0;
-        double positiveValSums = 0;
-        for (int trip1Index=0; trip1Index<trips.size(); trip1Index++) {
-            Trip trip1 = trips.get(trip1Index);
-            for (int stop1Index=0; stop1Index<trip1.size(); stop1Index++) {
-                for (int trip2Index=trip1Index+1; trip2Index<trips.size(); trip2Index++) { // Only check each pair of trips once
-                    Trip trip2 = trips.get(trip2Index);
-                    for (int stop2Index=0; stop2Index<trip2.size(); stop2Index++) {
-                        double swapVal = getSwapValue(trip1, trip2, stop1Index, stop2Index);
-                        if (swapVal >= 0) {
-                            accMoveCount++;
-                            positiveValSums += swapVal;
-                        }
+            // TODO lisää statusprinttiin liveness ja jätä vertailuks pyörimään "normiruni"
+
+            for (int fork=2; fork<=10; fork++) {
+                long forkStartTime = System.currentTimeMillis();
+                long expectedForkEndTime = forkStartTime + X*1000;
+                while (meters > goalMeters) {
+                    for (int i=0; i<10000; i++) {
+                        tryToExecuteRandomSteal();
+                        tryToExecuteRandomSwap();
                     }
+                    if (forkStartTime > 0.9 * expectedForkEndTime) {
+                        // Speedup by not calculating this all the time
+                        meters = sol.calcScore();
+                    }
+                    //TODO: something somewhere with these:
+                    //randomWalk(100);
+                    //reorderingExperiment();
                 }
+                printStatus(meters);
+                sol.calcLiveness();
             }
+
+
+
         }
-        SA_IN_USE = helper;
-        System.out.println("Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
-        return accMoveCount;
     }
 
     void hillClimbRandomRoute() {
@@ -202,7 +200,7 @@ public class SantaSolver {
         //}
         if (REORDER_EXPERIMENT) reorderingExperiment();
 
-        double scoreNow = calcScore(trips);
+        double scoreNow = sol.calcScore();
         minScoreSinceLastFreezeCheck = scoreNow;
         maxScoreSinceLastFreezeCheck = scoreNow;
         freezeCheckLastTime = System.currentTimeMillis();;
@@ -232,7 +230,7 @@ public class SantaSolver {
         REORDER_EXPERIMENT = true;
         periodicals();
         reorderingExperiment();
-        localSearchOrderOfIndividualTrips(trips);
+        localSearchOrderOfIndividualTrips(sol);
         optimalStealsAsLongAsPossible();
         reorderingExperiment();
 
@@ -248,7 +246,7 @@ public class SantaSolver {
 
     void reorderingExperiment() {
         System.out.println("Trying to shuffle individual trip orders with reordering experiment...");
-        for (Trip trip : trips) {
+        for (Trip trip : sol.trips) {
             if (trip.isEmpty()) continue;
             trip.updateMeters();
             tryToReorder(trip);
@@ -367,7 +365,7 @@ public class SantaSolver {
     void temp8() {
         double meters = 0;
         List<Trip> smallTrips = new ArrayList<>();
-        for (Trip trip : trips) {
+        for (Trip trip : sol.trips) {
             if (trip.isEmpty()) continue;
             if (trip.size() <= 11) {
                 System.out.println("size " + trip.size());
@@ -420,8 +418,8 @@ public class SantaSolver {
     }
 
     void tryToExecuteRandomSwap() {
-        Trip trip1 = trips.get(rng.nextInt(trips.size()));
-        Trip trip2 = trips.get(rng.nextInt(trips.size()));
+        Trip trip1 = sol.trips.get(rng.nextInt(sol.trips.size()));
+        Trip trip2 = sol.trips.get(rng.nextInt(sol.trips.size()));
         if (trip1.isEmpty() || trip2.isEmpty()) return;
         int stop1index = rng.nextInt(trip1.size());
         int stop2index = rng.nextInt(trip2.size());
@@ -461,8 +459,8 @@ public class SantaSolver {
     }
 
     void tryToExecuteRandomSteal() {
-        Trip giver = trips.get(rng.nextInt(trips.size()));
-        Trip taker = trips.get(rng.nextInt(trips.size()));
+        Trip giver = sol.trips.get(rng.nextInt(sol.trips.size()));
+        Trip taker = sol.trips.get(rng.nextInt(sol.trips.size()));
         if (giver.isEmpty()) return;
         if (giver == taker) return;
         int giverIndex = rng.nextInt(giver.size());
@@ -499,24 +497,23 @@ public class SantaSolver {
 
     void createBadRouteRandomly() {
         System.out.println("Generating a random solution from scratch...");
-        resetTrips();
+        sol = new Solution();
         List<Integer> candidates = new ArrayList<>();
         for (int candidate = 2; candidate < endId; candidate++) {
             candidates.add(candidate);
         }
         Collections.shuffle(candidates);
         for (int stop : candidates) {
-            Collections.shuffle(trips);
+            sol.shuffleTrips();
             for (int tripIndex = 0; ; tripIndex++) {
-                if (tripIndex >= trips.size()) trips.add(new Trip());
-                Trip trip = trips.get(tripIndex);
+                if (tripIndex >= sol.trips.size()) sol.addEmptyTrip();
+                Trip trip = sol.trips.get(tripIndex);
                 if (trip.weightSum + w[stop] <= MAX_TRIP_WEIGHT) {
                     trip.addStop(stop);
                     break;
                 }
             }
         }
-        addEmptyTrips();
     }
 
     void nnTSP(Trip trip) {
@@ -546,9 +543,9 @@ public class SantaSolver {
     // Detach all nodes whose "detour" value exceeds some threshold. Insert them back to good trips in random order.
     void probabilisticDetachment() {
         // TODO: revert when unsuccessful
-        double valBeforeDetachment = calcScore(trips);
+        double valBeforeDetachment = sol.calcScore();
         List<DetachmentCandidate> d = new ArrayList<>();
-        for (Trip trip : trips) {
+        for (Trip trip : sol.trips) {
             for (int i = 0; i < trip.size(); i++) {
                 int currId = trip.getIdFromIndex(i);
                 if (w[currId] > 50000)
@@ -593,7 +590,7 @@ public class SantaSolver {
             double bestCandidateInsertionVal = Double.NEGATIVE_INFINITY;
             int bestCandidateInsertionPos = 0;
 
-            for (Trip taker : trips) {
+            for (Trip taker : sol.trips) {
                 if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
                     continue;
                 int takerBestPos = -1;
@@ -616,13 +613,12 @@ public class SantaSolver {
 
             if (bestCandidate == null) {
                 System.out.println("Unable to find placement for id=" + currId + ", creating new trip for it.");
-                bestCandidate = new Trip();
+                bestCandidate = sol.addEmptyTrip();
                 bestCandidateInsertionPos = 0;
-                trips.add(bestCandidate);
             }
             bestCandidate.addStop(bestCandidateInsertionPos, currId); // No need to update meters yet
         }
-        double valAfterDetachment = calcScore(trips);
+        double valAfterDetachment = sol.calcScore();
         double diff = valBeforeDetachment - valAfterDetachment;
         System.out.println(formatAnsValue(valAfterDetachment) + " Detached " + detachedIds.size() + " destinations (" + Math.round(100.0 * detachedIds.size() / (endId - 2)) + "%) (diff " + diff + ")");
     }
@@ -652,10 +648,10 @@ public class SantaSolver {
     void optimalStealsAsLongAsPossible() {
         while (true) {
             boolean alive = false;
-            for (Trip taker : trips) {
+            for (Trip taker : sol.trips) {
                 while (true) {
                     boolean takerImproved = false;
-                    for (Trip giver : trips) {
+                    for (Trip giver : sol.trips) {
                         if (taker == giver) continue;
                         for (int i = 0; i < giver.size(); i++) {
                             if (transferIndex(i, giver, taker)) {
@@ -713,7 +709,7 @@ public class SantaSolver {
         System.out.print("Creating route from scratch... " + (verbose ? "\n" : ""));
 
         // Init
-        resetTrips();
+        sol = new Solution();
         weightRemaining = sumOfAllWeights;
         candidates = new ArrayList<>();
 
@@ -734,9 +730,8 @@ public class SantaSolver {
             createTrip();
         }
 
-        System.out.println("Route value " + formatAnsValue(calcScore(trips)));
-        addEmptyTrips();
-        writeAnsToFile(trips);
+        System.out.println("Route value " + formatAnsValue(sol.calcScore()));
+        writeAnsToFile(sol);
     }
 
     double getSmallestPossibleClusterSparsity() {
@@ -760,38 +755,33 @@ public class SantaSolver {
     // This method intentionally overfills (due to use case where this is used to set a lower bound)
     boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
 
-        currTrip = new Trip();
+        Trip trip = new Trip(0);
 
         // Lock down the furthest target
         int currId = candidates.get(candidates.size() - 1);
-        currTrip.addStop(currId);
+        trip.addStop(currId);
 
         double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
         while (true) {
             boolean change = false;
             for (int candidateId : candidates) {
-                if (currTrip.used[candidateId])
-                    continue;
+                if (trip.used[candidateId]) continue;
 
                 // Is candidate within maxSparsity?
                 double sparsity = Double.POSITIVE_INFINITY;
-                for (int id : currTrip.ids) {
+                for (int id : trip.ids) {
                     sparsity = Math.min(sparsity, dist[id][candidateId]);
                 }
-                if (sparsity > maxSparsity)
-                    continue;
+                if (sparsity > maxSparsity) continue;
 
                 // Add candidate to cluster
-                currTrip.addStop(candidateId);
-                if (currTrip.weightSum >= goal)
-                    return true;
+                trip.addStop(candidateId);
+                if (trip.weightSum >= goal) return true;
                 change = true;
             }
-            if (!change)
-                return false;
+            if (!change) return false;
         }
     }
-
 
     void createTrip() {
         // A trip consists of a cluster, and detours on the way to/from cluster.
@@ -803,7 +793,7 @@ public class SantaSolver {
         double sparsityMin = getSmallestPossibleClusterSparsity();
 
         // These will be filled
-        currTrip = new Trip();
+        currTrip = new Trip(0);
         indicesForCurrTrip = null;
 
         // Where to build cluster
@@ -820,7 +810,7 @@ public class SantaSolver {
             double detourModifier = 0.01;
             for (int tripOption = 1; tripOption <= 50; tripOption++) {
 
-                currTrip = new Trip();
+                currTrip = new Trip(0);
                 indicesForCurrTrip = new ArrayList<>();
 
                 // Lock down the furthest target
@@ -868,13 +858,13 @@ public class SantaSolver {
         }
 
         // Add current trip to route.
-        trips.add(bestTrip);
+        sol.addExistingTripAndFixItsId(bestTrip);
         weightRemaining -= bestTrip.weightSum;
 
         // Print statistics of this trip
         if (verbose) {
             System.out.println(
-                    "Trip #" + trips.size() +
+                    "Trip #" + sol.trips.size() +
                             " overall " + Math.round(bestTrip.meters / 1000) + "km, " +
                             "target " + Math.round(targetDist / 1000) + "km, " +
                             "detours " + Math.round((bestTrip.meters - 2 * targetDist) / 1000) + "km, " +
@@ -973,15 +963,14 @@ public class SantaSolver {
         }
     }
 
-    void localSearchOrderOfIndividualTrips(List<Trip> trips) {
-        for (Trip trip : trips) {
+    void localSearchOrderOfIndividualTrips(Solution trips) {
+        for (Trip trip : trips.trips) {
             localSearchOrderOfIndividualTrip(trip);
         }
     }
 
     // This method will local walk the order within a single trip to a local optima.
     void localSearchOrderOfIndividualTrip(Trip trip) {
-        if (!enableLocalWalk) return;
         if (trip.isEmpty()) return;
         int n = trip.size();
         int fromIndex = 0;
@@ -1017,16 +1006,95 @@ public class SantaSolver {
         }
     }
 
+    class Solution {
+        List<Trip> trips;
+        int nextFreeId;
 
-    void addEmptyTrips() {
-        // These provide some flexibility when moving between solutions
-        trips.add(new Trip());
-        trips.add(new Trip());
-    }
+        public Solution() {
+            reset();
+        }
 
-    void resetTrips() {
-        nextFreeTripId = 0;
-        trips = new ArrayList<>();
+        void reset() {
+            trips = new ArrayList<>();
+            nextFreeId = 0;
+            // These provide some flexibility when moving between solutions
+            addEmptyTrip();
+            addEmptyTrip();
+        }
+
+        Trip addEmptyTrip() {
+            Trip trip = new Trip(nextFreeId++);
+            trips.add(trip);
+            return trip;
+        }
+
+        void addExistingTripAndFixItsId(Trip trip) {
+            trip.tripId = nextFreeId++;
+            trips.add(trip);
+        }
+
+        void shuffleTrips() {
+            Collections.shuffle(trips);
+        }
+
+        Solution getCopy() {
+            // TODO
+            return null;
+        }
+
+        double calcScore() {
+            double meters = 0;
+            for (Trip trip : trips) {
+                meters += trip.updateMeters();
+            }
+            return meters;
+        }
+
+        int calcLiveness() {
+            boolean helper = SA_IN_USE;
+            SA_IN_USE = false;
+            int accMoveCount = 0;
+            double positiveValSums = 0;
+            for (int trip1Index=0; trip1Index<trips.size(); trip1Index++) {
+                Trip trip1 = trips.get(trip1Index);
+                for (int stop1Index=0; stop1Index<trip1.size(); stop1Index++) {
+                    for (int trip2Index=trip1Index+1; trip2Index<trips.size(); trip2Index++) { // Only check each pair of trips once
+                        Trip trip2 = trips.get(trip2Index);
+                        for (int stop2Index=0; stop2Index<trip2.size(); stop2Index++) {
+                            double swapVal = getSwapValue(trip1, trip2, stop1Index, stop2Index);
+                            if (swapVal >= 0) {
+                                accMoveCount++;
+                                positiveValSums += swapVal;
+                            }
+                        }
+                    }
+                }
+            }
+            SA_IN_USE = helper;
+            System.out.println("Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
+            return accMoveCount;
+        }
+
+        boolean isValid() {
+            HashSet<Integer> validityCheck = new HashSet<>();
+            for (Trip trip : trips) {
+                for (int id : trip.ids) {
+                    if (!validityCheck.add(id)) {
+                        System.out.println("Invalid solution! Id " + id + " appears twice!");
+                        return false;
+                    }
+                }
+                if (trip.weightSum > MAX_TRIP_WEIGHT) {
+                    System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
+                    return false;
+                }
+            }
+            if (validityCheck.size() != endId - 2) {
+                System.out.println("Invalid solution! Expected " + (endId - 2) + " stops, but actual was " + validityCheck.size());
+                return false;
+            }
+            return true;
+        }
     }
 
     class Trip {
@@ -1037,8 +1105,8 @@ public class SantaSolver {
         boolean[] used;
         long weightSum;
 
-        public Trip() {
-            tripId = nextFreeTripId++;
+        public Trip(int tripId) {
+            this.tripId = tripId;
             ids = new ArrayList<>();
             meters = 0;
             used = new boolean[endId];
@@ -1180,7 +1248,7 @@ public class SantaSolver {
     void oncePerSecondUpdates() {
         long timeNow = System.currentTimeMillis();
         if (timeNow > lastScorePrintTime + 1000) {
-            double scoreNow = calcScore(trips);
+            double scoreNow = sol.calcScore();
             updateFreezeCheck(scoreNow);
             printStatus(scoreNow);
         }
@@ -1299,8 +1367,7 @@ public class SantaSolver {
     void loadAndComparePreviousSolutions(String folderPath) throws FileNotFoundException {
         for (int i = 1; ; i++) {
             String filePath = folderPath + File.separator + "santamap" + i + ".txt";
-            if (!new File(filePath).exists())
-                break;
+            if (!new File(filePath).exists()) break;
             Double val = loadSolution(filePath);
             if (val != null && val < bestLoadedScore) {
                 bestLoadedScore = val;
@@ -1315,30 +1382,28 @@ public class SantaSolver {
 
     Double loadSolution(String filePath) throws FileNotFoundException {
         System.out.print("Loading " + filePath + "... ");
-        resetTrips();
+        sol = new Solution();
         File f = new File(filePath);
         if (!f.exists())
             throw new RuntimeException("File doesn't exist: " + filePath);
         Scanner scanner = new Scanner(f);
         while (scanner.hasNext()) {
             String[] line = scanner.nextLine().split(";");
-            Trip trip = new Trip();
+            Trip trip = new Trip(0);
             try {
                 for (int i = 0; i < line.length; i++) {
                     String element = line[i].replace(" ", "");
                     int id = Integer.parseInt(element);
                     trip.addStop(id);
                 }
-                trips.add(trip);
+                sol.addExistingTripAndFixItsId(trip);
             } catch (Exception ex) {
                 System.out.println("Exception: " + ex.toString());
                 return null;
             }
         }
-        addEmptyTrips();
-        if (!isSolutionValid(trips))
-            return null;
-        double val = calcScore(trips);
+        if (!sol.isValid()) return null;
+        double val = sol.calcScore();
         bestSavedScore = Math.min(bestSavedScore, val);
         System.out.println("Solution value " + formatAnsValue(val));
         return val;
@@ -1351,7 +1416,7 @@ public class SantaSolver {
         long time = System.currentTimeMillis();
         if (time > lastScoreSaveTime + saveIntervalSeconds * 1000) {
             lastScoreSaveTime = time;
-            writeAnsToFile(trips);
+            writeAnsToFile(sol);
         }
     }
 
@@ -1367,13 +1432,13 @@ public class SantaSolver {
         }
     }
 
-    void writeAnsToFile(List<Trip> trips) {
+    void writeAnsToFile(Solution sol) {
         if (saveFolderPath == null || saveFolderPath.isEmpty()) {
             throw new RuntimeException("Save folder not defined!");
         }
-        if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
-        if (!isSolutionValid(trips)) throw new RuntimeException("Attempted to save invalid solution.");
-        double val = calcScore(trips);
+        if (sol.trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
+        if (!sol.isValid()) throw new RuntimeException("Attempted to save invalid solution.");
+        double val = sol.calcScore();
         if (val + 0.0001 >= bestSavedScore) {
             return;
         }
@@ -1392,7 +1457,7 @@ public class SantaSolver {
         System.out.println("Writing solution of value " + formatAnsValue(val) + " to " + fileName);
         // Write solution to file
         try (Writer writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(fileName), "utf-8"))) {
-            for (Trip trip : trips) {
+            for (Trip trip : sol.trips) {
                 if (trip.isEmpty()) continue;
                 writer.write(trip.toString() + "\n");
             }
@@ -1404,29 +1469,8 @@ public class SantaSolver {
     /********************************** UTILITIES ***************************************/
 
     void assertSolutionValid() {
-        if (!isSolutionValid(trips))
+        if (!sol.isValid())
             throw new RuntimeException("Solution invalid!");
-    }
-
-    boolean isSolutionValid(List<Trip> trips) {
-        HashSet<Integer> validityCheck = new HashSet<>();
-        for (Trip trip : trips) {
-            for (int id : trip.ids) {
-                if (!validityCheck.add(id)) {
-                    System.out.println("Invalid solution! Id " + id + " appears twice!");
-                    return false;
-                }
-            }
-            if (trip.weightSum > MAX_TRIP_WEIGHT) {
-                System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
-                return false;
-            }
-        }
-        if (validityCheck.size() != endId - 2) {
-            System.out.println("Invalid solution! Expected " + (endId - 2) + " stops, but actual was " + validityCheck.size());
-            return false;
-        }
-        return true;
     }
 
     void preCalcAllDistances() throws Exception {
@@ -1481,14 +1525,6 @@ public class SantaSolver {
             loneliness[id] = dist[id][furthestNeighborInCluster];
         }
         return loneliness;
-    }
-
-    double calcScore(List<Trip> trips) {
-        double meters = 0;
-        for (Trip trip : trips) {
-            meters += trip.updateMeters();
-        }
-        return meters;
     }
 
     double utz(Trip trip) {
@@ -1584,7 +1620,7 @@ public class SantaSolver {
 
     void canWeRedistribute() {
         PriorityQueue<Helper> q = new PriorityQueue<>(Collections.reverseOrder());
-        for (Trip trip : trips) {
+        for (Trip trip : sol.trips) {
             if (trip.isEmpty()) continue;
             q.add(new Helper(trip, trip.weightSum));
         }
