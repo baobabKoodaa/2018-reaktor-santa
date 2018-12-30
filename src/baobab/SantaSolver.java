@@ -51,7 +51,7 @@ public class SantaSolver {
     double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
     double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
     double freezeCheckMinimumDiff = 500000;
-    double freezeConditionTemperatureMultiplier = 2;
+    double freezeConditionTemperatureMultiplier = 4;
 
     // Overfill (solution space expansion)
     int maxTripWeight = REAL_MAX_TRIP_WEIGHT;
@@ -61,7 +61,7 @@ public class SantaSolver {
     static int NO_OVERFILL = 0;
     static int OVERFILL_WEIGHT_EXPANSION = 1;
     static int OVERFILL_PENALTY_EXPANSION = 2;
-    double initialOverfillPenalty = 1;
+    double initialOverfillPenalty = 10;
     double overfillPenalty = 0;
     double overfillPenaltyModifier = 1.03;
 
@@ -110,12 +110,9 @@ public class SantaSolver {
         else if (actionType == 7) jumpStartSimulatedAnnealing();
     }
 
-    // TODO color-outside-the-lines (when returning to normal weight, slowly increase penalty for staying in / going to the "expanded zone")
+    // TODO testaa onko yksittäisissä tripeissä ~2% optimoitavaa? esim. bruteta up-to-11 kokoset ja katso parannus: +0.13% pienissä
+    // TODO mut ehkä SA saa paremmin pidettyä elossa ku välillä vaihtelee trippien sisäistä järjestystä?!
 
-    // TODO optimize-the-fuck-out-of-a-final-solution (TSP solver)
-    // TODO testaa onko yksittäisissä tripeissä ~2% optimoitavaa? esim. bruteta 7-10 kokoset ja katso parannus
-
-    // TODO klusteroinnissa minDist sijaan kauimpana olevat? (niistä jotka on maxSparsityn sisällä)
 
     // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
 
@@ -150,8 +147,7 @@ public class SantaSolver {
     }
 
     void periodicallyShakeIfNeeded() {
-        if (!SA_IN_USE)
-            return;
+        if (!SA_IN_USE) return;
         long now = System.currentTimeMillis();
         if (freezeCheckLastTime == 0) {
             // No shake at the first call of this method
@@ -164,8 +160,9 @@ public class SantaSolver {
         }
         if (shakingNeeded()) {
             System.out.print("Freeze condition detected. ");
-            shakeByOverfill();
-            //oldShake();
+            //shakeByOverfill();
+            shakeByTemperatureJump();
+            if (REORDER_EXPERIMENT) reorderingExperiment();
         }
 
         double scoreNow = calcScore(trips);
@@ -192,7 +189,7 @@ public class SantaSolver {
         updateOverfill(); // and every 1 second along with status prints
     }
 
-    void oldShake() {
+    void shakeByTemperatureJump() {
         System.out.println("Shaking by jumping temperature upwards...");
         temperature *= freezeConditionTemperatureMultiplier;
         //probabilisticDetachment();
@@ -201,10 +198,14 @@ public class SantaSolver {
     void foreverImproveAnExistingRoute() throws FileNotFoundException {
         SA_IN_USE = true;
         temperature = 1000.0; // Need lower than default temperature
-        Double val = loadPreviouslyFoundSolution(getFilePath("run91\\santamap1"));
-        periodicals();
-        shakeByOverfill();
+        Double val = loadSolution(getFilePath("run91\\santamap1"));
         if (val == null) return;
+
+        //temp8();
+        REORDER_EXPERIMENT = true;
+        periodicals();
+        reorderingExperiment();
+
         while (true) {
             periodicals();
             //localSearchOrderOfIndividualTrips(trips);
@@ -215,6 +216,191 @@ public class SantaSolver {
         }
 
 
+    }
+
+    boolean REORDER_EXPERIMENT = false;
+
+    void reorderingExperiment() {
+        double before = 0;
+        for (Trip trip : trips) {
+            if (trip.isEmpty()) continue;
+            before += trip.updateMeters();
+            tryToReorder(trip);
+            System.out.println("trip done " + trip.tripId);
+        }
+        double after = calcScore(trips);
+        System.out.println("Reordering experiment yielded gains of " + formatAnsValue(before-after));
+    }
+
+    void tryToReorder(Trip trip) {
+        // Precalc move options based on distances
+        List<IDval>[] closest = new ArrayList[endId];
+        for (int i=0; i<=trip.size(); i++) {
+            int from = (i<trip.size()? trip.ids.get(i) : 1);
+            closest[from] = new ArrayList<>();
+            for (int j=0; j<trip.size(); j++) {
+                int to = trip.ids.get(j);
+                closest[from].add(new IDval(to, dist[from][to]));
+            }
+            Collections.sort(closest[from]);
+        }
+        // Try 10k different orders probabilistically
+        List<Integer> bestOrder = trip.ids;
+        double bestMeters = trip.meters + 1000; // Slightly favor new solutions
+        boolean[] used = new boolean[endId];
+        for (int i=0; i<10000; i++) {
+
+            // Create order
+            int prevId = 1;
+            double meters = - rng.nextInt(1000); // Slightly randomize and favor new solutions
+            List<Integer> order = new ArrayList<>();
+            for (int j=0; j<trip.size(); j++) {
+                // Create likelihoods for picking any of top 5 candidates
+                double sum = 0;
+                List<IDval> topCandidates = new ArrayList<>(5);
+                for (int k=0; k<trip.size(); k++) {
+                    IDval candidate = closest[prevId].get(k);
+                    if (used[candidate.id]) continue;
+                    topCandidates.add(candidate);
+                    sum += candidate.val;
+                    if (topCandidates.size() == 5) break;
+                }
+                double adjustedSum = 0;
+                for (IDval candidate : topCandidates) {
+                    double oppositeVal = sum - candidate.val;
+                    adjustedSum += oppositeVal;
+                }
+                // Move to 1 of top 5 candidates
+                double decisionThreshold = rng.nextDouble() * adjustedSum * 0.999999999;
+                boolean choseCandidate = false;
+                for (int k=0; k<topCandidates.size(); k++) {
+                    IDval candidate = topCandidates.get(k);
+                    double oppositeVal = sum-candidate.val;
+                    if (decisionThreshold <= oppositeVal) {
+                        choseCandidate = true;
+                        used[candidate.id] = true;
+                        meters += dist[prevId][candidate.id];
+                        order.add(candidate.id);
+                        prevId = candidate.id;
+                        break;
+                    }
+                    decisionThreshold -= oppositeVal;
+                }
+                if (!choseCandidate) {
+                    System.out.println("PROBLEM! topCandidates size = " +topCandidates.size());
+                }
+                //System.out.println("...");
+            }
+            meters += dist[order.get(order.size()-1)][1];
+
+            // Revert "used"
+            for (int k=0; k<trip.size(); k++) used[order.get(k)] = false;
+
+            // Is this the best order?
+            if (meters < bestMeters) {
+                System.out.println("Found something better! " + meters + " vs " + bestMeters);
+                bestMeters = meters;
+                bestOrder = order;
+            }
+        }
+        trip.ids = bestOrder;
+    }
+
+    double heldKarp(Trip trip) {
+        // https://stackoverflow.com/a/40311520/4490400
+        HashMap<Integer, Integer> idMapping = new HashMap<>();
+        int nextFreeId = 0;
+        for (int realId : trip.ids) {
+            int shortId = nextFreeId++;
+            idMapping.put(shortId, realId);
+        }
+        int n = trip.size();
+        double[][] distance = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            int realIdI = idMapping.get(i);
+            for (int j = i + 1; j < n; j++) {
+                int realIdJ = idMapping.get(j);
+                double d = dist[realIdI][realIdJ];
+                distance[i][j] = d;
+                distance[j][i] = d;
+            }
+        }
+        double[][] dp = new double[n][1 << n];
+        for (int i = 0; i < dp.length; i++) Arrays.fill(dp[i], Double.POSITIVE_INFINITY);
+        dp[0][1] = 0.0;
+        for (int mask = 1; mask < (1 << n); mask++) {
+            for (int last = 0; last < n; last++) {
+                if ((mask & (1 << last)) == 0) continue;
+                for (int next = 0; next < n; next++) {
+                    if ((mask & (1 << next)) != 0) continue;
+                    dp[next][mask | (1 << next)] = Math.min(
+                            dp[next][mask | (1 << next)],
+                            dp[last][mask] + distance[last][next]);
+                }
+            }
+        }
+        double res = Double.POSITIVE_INFINITY;
+        for (int lastNode = 0; lastNode < n; lastNode++) {
+            res = Math.min(res, dist[lastNode][0] + dp[lastNode][(1 << n) - 1]);
+        }
+        System.out.println(res);
+        temp9 = res;
+        return res;
+    }
+
+    void temp8() {
+        double meters = 0;
+        List<Trip> smallTrips = new ArrayList<>();
+        for (Trip trip : trips) {
+            if (trip.isEmpty()) continue;
+            if (trip.size() <= 11) {
+                System.out.println("size " + trip.size());
+                smallTrips.add(trip);
+                meters += trip.meters;
+            }
+        }
+        System.out.println("Alle 11 count " + smallTrips.size());
+        System.out.println("Non optimized meters: " + meters);
+        double optimized = tempBruteTSP(smallTrips);
+        System.out.println("Optimized meters: " + optimized);
+        System.out.println("Improvement: " + meters/optimized);
+    }
+    double tempBruteTSP(List<Trip> trips) {
+        double meters = 0;
+        for (Trip trip : trips) {
+            temp9 = Double.POSITIVE_INFINITY;;
+            //tempBruteTSP(trip);
+            heldKarp(trip);
+            meters += temp9;
+        }
+        return meters;
+    }
+
+    double temp9;
+    void tempBruteTSP(Trip trip) {
+        int[] order = new int[trip.size()];
+        rec(order, trip, 0);
+    }
+    void rec(int[] order, Trip original, int i) {
+        if (i >= original.size()) {
+            double meters = 0;
+            int prevId = 1;
+            for (int j=0; j<order.length; j++) {
+                int id = order[j];
+                meters += dist[prevId][id];
+                prevId = id;
+            }
+            meters += dist[prevId][1];
+            temp9 = Math.min(temp9, meters);
+            return;
+        }
+        int id = original.getIdFromIndex(i);
+        for (int j=0; j<order.length; j++) {
+            if (order[j] != 0) continue;
+            order[j] = id;
+            rec(order, original, i+1);
+            order[j] = 0;
+        }
     }
 
     void proposeRandomSwap() {
@@ -570,6 +756,7 @@ public class SantaSolver {
             createTrip();
         }
 
+        System.out.println("Route value " + formatAnsValue(calcScore(trips)));
         addEmptyTrips();
         writeAnsToFile(trips);
     }
@@ -678,8 +865,7 @@ public class SantaSolver {
                 }
 
                 if (utz(currTrip) < UTZ_CLUSTER_GOAL) {
-                    if (tripOption < 2)
-                        break; // to speedup
+                    if (tripOption < 2) break; // to speedup
                     continue;
                 }
 
@@ -1187,12 +1373,15 @@ public class SantaSolver {
         maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
     }
 
+
+    int temp = 0;
     void updateOverfill() {
         if (overfillStatus == OVERFILL_WEIGHT_EXPANSION) {
-
             // experimental
             currOverfill = PEAK_OVERFILL;
-            if (averageFill(trips) < 1.3) {
+            if (temp == 0) {
+            //if (averageFill(trips) < 1+(PEAK_OVERFILL-1)/4) {
+                temp++;
 
             //if (currOverfill < PEAK_OVERFILL) {
                 // Slowly allow trips to have more and more overfill.
@@ -1277,8 +1466,6 @@ public class SantaSolver {
                     + ", maxTripWeight=" + maxTripWeight
                     + ", overfillPenalty=" + overfillPenalty;
             ;
-        } else {
-            extras += (" | Average fill " + formatPercent(averageFill(trips)));
         }
         System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
         lastScorePrintTime = now;
@@ -1303,7 +1490,7 @@ public class SantaSolver {
             String filePath = folderPath + File.separator + "santamap" + i + ".txt";
             if (!new File(filePath).exists())
                 break;
-            Double val = loadPreviouslyFoundSolution(filePath);
+            Double val = loadSolution(filePath);
             if (val != null && val < bestLoadedScore) {
                 bestLoadedScore = val;
                 filePathToBestSavedSolution = filePath;
@@ -1315,7 +1502,7 @@ public class SantaSolver {
         return OUTPUT_DIR + File.separator + fileName + ".txt";
     }
 
-    Double loadPreviouslyFoundSolution(String filePath) throws FileNotFoundException {
+    Double loadSolution(String filePath) throws FileNotFoundException {
         System.out.print("Loading " + filePath + "... ");
         resetTrips();
         File f = new File(filePath);
@@ -1410,6 +1597,46 @@ public class SantaSolver {
         return 1.0 * trip.weightSum / maxTripWeight;
     }
 
+    void printTrips(List<Trip> trips) {
+        List<Helper> ordered = new ArrayList<>();
+        for (Trip trip : trips) {
+            ordered.add(new Helper(trip, utz(trip)));
+        }
+        Collections.sort(ordered);
+        for (Helper h : ordered) {
+            Trip trip = h.trip;
+            double furthestDist = 0;
+            for (int id : trip.ids) furthestDist = Math.max(furthestDist, dist[1][id]);
+            System.out.println(
+                    "Trip #" + trip.tripId +
+                            " overall " + Math.round(trip.meters / 1000) + "km, " +
+                            "target " + Math.round(furthestDist / 1000) + "km, " +
+                            "detours " + Math.round((trip.meters - 2 * furthestDist) / 1000) + "km, " +
+                            trip.size() + " stops, " +
+                            "utz " + utz(trip)
+            );
+        }
+    }
+
+    class Helper implements Comparable {
+
+        Trip trip;
+        double v;
+
+        public Helper(Trip trip, double v) {
+            this.trip = trip;
+            this.v = v;
+        }
+
+        @Override
+        public int compareTo(Object o) {
+            Helper other = (Helper) o;
+            if (this.v < other.v) return 1;
+            if (other.v < this.v) return -1;
+            return 0;
+        }
+    }
+
     String formatAnsValue(double val) {
         NumberFormat formatter = new DecimalFormat("#0.0000");
         return formatter.format(val / 1e9);
@@ -1455,6 +1682,32 @@ public class SantaSolver {
                 return 1;
             return this.id - o.id;
         }
+    }
+
+    void canWeRedistribute() {
+        PriorityQueue<Helper> q = new PriorityQueue<>(Collections.reverseOrder());
+        for (Trip trip : trips) {
+            if (trip.isEmpty()) continue;
+            q.add(new Helper(trip, trip.weightSum));
+        }
+        Trip giver = q.poll().trip;
+        System.out.println("Givers weight " + giver.weightSum);
+        PriorityQueue<IDval> ids = new PriorityQueue<>();
+        for (int id : giver.ids) {
+            ids.add(new IDval(id, -w[id]));
+        }
+        while (!ids.isEmpty()) {
+            int id = ids.poll().id;
+            Helper taker = q.poll();
+            if (taker.v + w[id] > maxTripWeight) {
+                System.out.println("Can't put id="+id+" (weight " + w[id] + " into taker " + taker.trip.tripId + " (weightSum " + taker.v + "), because weight sum would be " + (taker.v + w[id]));
+                return;
+            }
+            System.out.println("Can put thing with weight " + w[id] + " into taker with weight " + taker.v);
+            taker.v += w[id];
+            q.add(taker);
+        }
+        System.out.println("SUCCESS!");
     }
 
 }
