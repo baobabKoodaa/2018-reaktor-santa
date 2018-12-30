@@ -8,14 +8,14 @@ import java.util.*;
 public class SantaSolver {
 
     // Constants from problem statement
-    double SANTA_HOME_LATITUDE = 68.073611;
-    double SANTA_HOME_LONGITUDE = 29.315278;
-    int REAL_MAX_TRIP_WEIGHT = 10000000;
+    static double SANTA_HOME_LATITUDE = 68.073611;
+    static double SANTA_HOME_LONGITUDE = 29.315278;
+    static int REAL_MAX_TRIP_WEIGHT = 10000000;
 
     // Input will be read into these variables
     int endId;
     double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
-    int[] w;
+    int[] w; // weights
     long sumOfAllWeights;
     double[][] dist;
 
@@ -40,18 +40,19 @@ public class SantaSolver {
 
     // Simulated annealing
     boolean SA_IN_USE = false;
-    double maxTemperature = 10000000.0;
+    double maxTemperature = 100000.0;
     double temperature = maxTemperature;
     double coolingRate = 0.9999999;
-    double coolingReduction = 0.015;
+    double coolingReduction = 0.0001;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
-    long freezeCheckIntervalSeconds = 81;
+    long freezeCheckIntervalSeconds = 65;
     double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
     double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
     double freezeCheckMinimumDiff = 500000;
-    double freezeConditionTemperatureMultiplier = 4;
+    double freezeConditionTemperatureMultiplier = 10;
+    boolean REORDER_EXPERIMENT = true;
 
     // Overfill (solution space expansion)
     int maxTripWeight = REAL_MAX_TRIP_WEIGHT;
@@ -110,11 +111,13 @@ public class SantaSolver {
         else if (actionType == 7) jumpStartSimulatedAnnealing();
     }
 
-    // TODO testaa onko yksittäisissä tripeissä ~2% optimoitavaa? esim. bruteta up-to-11 kokoset ja katso parannus: +0.13% pienissä
-    // TODO mut ehkä SA saa paremmin pidettyä elossa ku välillä vaihtelee trippien sisäistä järjestystä?!
-
+    // brutettu up-to-11 kokoset, parannus: +0.13% (eli jos exact solvataan yksittäisiä reittejä ni ehkä isommista enemmän parannusta vielä, 0.3% vois olla odotettu?
 
     // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
+
+    // TODO GA trip plucking
+
+    //
 
     void randomRouteHillClimb() {
         createBadRouteRandomly();
@@ -158,17 +161,17 @@ public class SantaSolver {
             // Freeze check interval not yet complete.
             return;
         }
-        if (shakingNeeded()) {
-            System.out.print("Freeze condition detected. ");
-            //shakeByOverfill();
-            shakeByTemperatureJump();
-            if (REORDER_EXPERIMENT) reorderingExperiment();
-        }
+        //if (shakingNeeded()) {
+        //    System.out.print("Freeze condition detected. ");
+        //    //shakeByOverfill();
+        //    //shakeByTemperatureJump();
+        //}
+        if (REORDER_EXPERIMENT) reorderingExperiment();
 
         double scoreNow = calcScore(trips);
         minScoreSinceLastFreezeCheck = scoreNow;
         maxScoreSinceLastFreezeCheck = scoreNow;
-        freezeCheckLastTime = now;
+        freezeCheckLastTime = System.currentTimeMillis();;
     }
 
     boolean shakingNeeded() {
@@ -197,19 +200,20 @@ public class SantaSolver {
 
     void foreverImproveAnExistingRoute() throws FileNotFoundException {
         SA_IN_USE = true;
-        temperature = 1000.0; // Need lower than default temperature
-        Double val = loadSolution(getFilePath("run91\\santamap1"));
+        temperature = 600.0; // Need lower than default temperature
+        Double val = loadSolution(getFilePath("run224\\santamap33"));
         if (val == null) return;
 
         //temp8();
         REORDER_EXPERIMENT = true;
         periodicals();
         reorderingExperiment();
+        localSearchOrderOfIndividualTrips(trips);
+        optimalStealsAsLongAsPossible();
+        reorderingExperiment();
 
         while (true) {
             periodicals();
-            //localSearchOrderOfIndividualTrips(trips);
-            //optimalStealsAsLongAsPossible();
             //shuffleAndSortIndividualTrips();
             proposeRandomSwap();
             proposeRandomSteal();
@@ -218,15 +222,12 @@ public class SantaSolver {
 
     }
 
-    boolean REORDER_EXPERIMENT = false;
-
     void reorderingExperiment() {
         double before = 0;
         for (Trip trip : trips) {
             if (trip.isEmpty()) continue;
             before += trip.updateMeters();
             tryToReorder(trip);
-            System.out.println("trip done " + trip.tripId);
         }
         double after = calcScore(trips);
         System.out.println("Reordering experiment yielded gains of " + formatAnsValue(before-after));
@@ -244,26 +245,26 @@ public class SantaSolver {
             }
             Collections.sort(closest[from]);
         }
-        // Try 10k different orders probabilistically
+        // Try different orders probabilistically
         List<Integer> bestOrder = trip.ids;
-        double bestMeters = trip.meters + 1000; // Slightly favor new solutions
+        double bestMeters = trip.meters;
         boolean[] used = new boolean[endId];
         for (int i=0; i<10000; i++) {
 
             // Create order
             int prevId = 1;
-            double meters = - rng.nextInt(1000); // Slightly randomize and favor new solutions
+            double meters = - rng.nextInt(50000); // Slightly randomize and favor new solutions
             List<Integer> order = new ArrayList<>();
             for (int j=0; j<trip.size(); j++) {
-                // Create likelihoods for picking any of top 5 candidates
+                // Create likelihoods for picking any of top 4 candidates
                 double sum = 0;
-                List<IDval> topCandidates = new ArrayList<>(5);
+                List<IDval> topCandidates = new ArrayList<>(4);
                 for (int k=0; k<trip.size(); k++) {
                     IDval candidate = closest[prevId].get(k);
                     if (used[candidate.id]) continue;
                     topCandidates.add(candidate);
                     sum += candidate.val;
-                    if (topCandidates.size() == 5) break;
+                    if (topCandidates.size() == 4) break;
                 }
                 double adjustedSum = 0;
                 for (IDval candidate : topCandidates) {
@@ -289,7 +290,6 @@ public class SantaSolver {
                 if (!choseCandidate) {
                     System.out.println("PROBLEM! topCandidates size = " +topCandidates.size());
                 }
-                //System.out.println("...");
             }
             meters += dist[order.get(order.size()-1)][1];
 
@@ -298,7 +298,7 @@ public class SantaSolver {
 
             // Is this the best order?
             if (meters < bestMeters) {
-                System.out.println("Found something better! " + meters + " vs " + bestMeters);
+                //System.out.println(trip.tripId + " Found something better! " + meters + " vs " + bestMeters);
                 bestMeters = meters;
                 bestOrder = order;
             }
@@ -500,11 +500,15 @@ public class SantaSolver {
     void createBadRouteRandomly() {
         System.out.println("Generating a random solution from scratch...");
         resetTrips();
-        for (int stop = 2; stop < endId; stop++) {
+        List<Integer> candidates = new ArrayList<>();
+        for (int candidate = 2; candidate < endId; candidate++) {
+            candidates.add(candidate);
+        }
+        Collections.shuffle(candidates);
+        for (int stop : candidates) {
             Collections.shuffle(trips);
             for (int tripIndex = 0; ; tripIndex++) {
-                if (tripIndex >= trips.size())
-                    trips.add(new Trip());
+                if (tripIndex >= trips.size()) trips.add(new Trip());
                 Trip trip = trips.get(tripIndex);
                 if (trip.weightSum + w[stop] <= maxTripWeight) {
                     trip.addStop(stop);
@@ -737,13 +741,7 @@ public class SantaSolver {
         double[] loneliness = getLoneliness();
         List<IDval> sortHelper = new ArrayList<>();
         for (int id = 2; id < endId; id++) {
-            // Experimenting with more advanced heuristic here
-            double heuristicVal = dist[1][id];
-
-            // Previously discovered challenging nodes should be given priority
-            //if (challengingNodes.contains(id)) heuristicVal += 100000L; // was making results slightly worse
-            //if (loneliness[id] > 1000000) heuristicVal += 100000000;  // was making results slightly worse
-
+            double heuristicVal = dist[1][id] + rng.nextInt(100000);
             sortHelper.add(new IDval(id, heuristicVal));
         }
         Collections.sort(sortHelper);
