@@ -10,7 +10,7 @@ public class SantaSolver {
     // Constants from problem statement
     static double SANTA_HOME_LATITUDE = 68.073611;
     static double SANTA_HOME_LONGITUDE = 29.315278;
-    static int REAL_MAX_TRIP_WEIGHT = 10000000;
+    static int MAX_TRIP_WEIGHT = 10000000;
 
     // Input will be read into these variables
     int endId;
@@ -98,28 +98,67 @@ public class SantaSolver {
         else if (actionType == 5) hillClimbRandomRoute();
         else if (actionType == 6) simulatedAnnealingRandomRoute();
         else if (actionType == 7) simulatedAnnealingJumpStart();
+        else if (actionType == 8) livenessExperiment();
     }
 
     // brutettu up-to-11 kokoset, parannus: +0.13% (eli jos exact solvataan yksittäisiä reittejä ni ehkä isommista enemmän parannusta vielä, 0.3% vois olla odotettu?
 
     // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
 
-    // TODO GA trip plucking
-
     void livenessExperiment() {
-        createBadRouteRandomly();
-        double meters = calcScore(trips);
+        SA_IN_USE = true;
+        double goalMeters = 30000000000L;
         while (true) {
+            temperature = temperatureAtRandomStart;
+            createBadRouteRandomly();
+            double meters = calcScore(trips);
+            printStatus(meters);
 
+            while (meters > goalMeters) {
+                for (int i=0; i<50000; i++) {
+                    tryToExecuteRandomSteal();
+                    tryToExecuteRandomSwap();
+                }
+                meters = calcScore(trips);
+                //randomWalk(100);
+                //reorderingExperiment();
+            }
+            printStatus(meters);
+            calcLiveness(trips);
         }
+    }
+
+    int calcLiveness(List<Trip> trips) {
+        boolean helper = SA_IN_USE;
+        SA_IN_USE = false;
+        int accMoveCount = 0;
+        double positiveValSums = 0;
+        for (int trip1Index=0; trip1Index<trips.size(); trip1Index++) {
+            Trip trip1 = trips.get(trip1Index);
+            for (int stop1Index=0; stop1Index<trip1.size(); stop1Index++) {
+                for (int trip2Index=trip1Index+1; trip2Index<trips.size(); trip2Index++) { // Only check each pair of trips once
+                    Trip trip2 = trips.get(trip2Index);
+                    for (int stop2Index=0; stop2Index<trip2.size(); stop2Index++) {
+                        double swapVal = getSwapValue(trip1, trip2, stop1Index, stop2Index);
+                        if (swapVal >= 0) {
+                            accMoveCount++;
+                            positiveValSums += swapVal;
+                        }
+                    }
+                }
+            }
+        }
+        SA_IN_USE = helper;
+        System.out.println("Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
+        return accMoveCount;
     }
 
     void hillClimbRandomRoute() {
         createBadRouteRandomly();
         while (true) {
             periodicals();
-            proposeRandomSwap();
-            proposeRandomSteal();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
         }
     }
 
@@ -129,8 +168,8 @@ public class SantaSolver {
         SA_IN_USE = true;
         while (true) {
             periodicals();
-            proposeRandomSwap();
-            proposeRandomSteal();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
         }
     }
 
@@ -140,8 +179,8 @@ public class SantaSolver {
         SA_IN_USE = true;
         while (true) {
             periodicals();
-            proposeRandomSwap();
-            proposeRandomSteal();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
         }
     }
 
@@ -200,8 +239,8 @@ public class SantaSolver {
         while (true) {
             periodicals();
             //shuffleAndSortIndividualTrips();
-            proposeRandomSwap();
-            proposeRandomSteal();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
         }
 
 
@@ -380,33 +419,24 @@ public class SantaSolver {
         }
     }
 
-    void proposeRandomSwap() {
+    void tryToExecuteRandomSwap() {
         Trip trip1 = trips.get(rng.nextInt(trips.size()));
         Trip trip2 = trips.get(rng.nextInt(trips.size()));
-        if (trip1.isEmpty() || trip2.isEmpty())
-            return;
+        if (trip1.isEmpty() || trip2.isEmpty()) return;
         int stop1index = rng.nextInt(trip1.size());
         int stop2index = rng.nextInt(trip2.size());
         int stop1id = trip1.getIdFromIndex(stop1index);
         int stop2id = trip2.getIdFromIndex(stop2index);
-        if (stop1id == stop2id)
-            return;
-        if (trip1 != trip2) {
-            if (trip1.weightSum + w[stop2id] - w[stop1id] > REAL_MAX_TRIP_WEIGHT) return;
-            if (trip2.weightSum + w[stop1id] - w[stop2id] > REAL_MAX_TRIP_WEIGHT) return;
-            double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
-            double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
-            double proposalVal = replacementVal1 + replacementVal2;
-            if (acceptProposal(proposalVal)) {
+        if (stop1id == stop2id) return;
+        double swapVal = getSwapValue(trip1, trip2, stop1index, stop2index);
+        if (acceptProposal(swapVal)) {
+            if (trip1 != trip2) {
                 trip1.addStop(stop1index, stop2id);
                 trip2.addStop(stop2index, stop1id);
                 trip1.removeId(stop1id);
                 trip2.removeId(stop2id);
-            }
-        } else {
-            Trip trip = trip1;
-            double proposalVal = trip.getSwapVal(stop1index, stop2index);
-            if (acceptProposal(proposalVal)) {
+            } else {
+                Trip trip = trip1;
                 trip.removeIndex(stop1index);
                 trip.addStop(stop1index, stop2id);
                 trip.removeIndex(stop2index);
@@ -415,7 +445,22 @@ public class SantaSolver {
         }
     }
 
-    void proposeRandomSteal() {
+    double getSwapValue(Trip trip1, Trip trip2, int stop1index, int stop2index) {
+        int stop1id = trip1.getIdFromIndex(stop1index);
+        int stop2id = trip2.getIdFromIndex(stop2index);
+        if (stop1id == stop2id) return 0;
+        if (trip1 != trip2) {
+            if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
+            if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
+            double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
+            double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
+            return replacementVal1 + replacementVal2;
+        } else {
+            return trip1.getSwapVal(stop1index, stop2index);
+        }
+    }
+
+    void tryToExecuteRandomSteal() {
         Trip giver = trips.get(rng.nextInt(trips.size()));
         Trip taker = trips.get(rng.nextInt(trips.size()));
         if (giver.isEmpty()) return;
@@ -423,7 +468,7 @@ public class SantaSolver {
         int giverIndex = rng.nextInt(giver.size());
         int takerIndex = rng.nextInt(taker.size() + 1);
         int stealId = giver.getIdFromIndex(giverIndex);
-        if (taker.weightSum + w[stealId] > REAL_MAX_TRIP_WEIGHT) return;
+        if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT) return;
         double removalVal = giver.getRemovalVal(giverIndex);
         double insertionVal = taker.getInsertionVal(stealId, takerIndex);
         double proposalVal = removalVal + insertionVal;
@@ -434,6 +479,7 @@ public class SantaSolver {
     }
 
     boolean acceptProposal(double proposalVal) {
+        if (proposalVal < -999999999999.9) return false; // just a speedup
         if (SA_IN_USE) {
             if (proposalVal >= 0) return true;
             double P = Math.exp(proposalVal / temperature);
@@ -464,7 +510,7 @@ public class SantaSolver {
             for (int tripIndex = 0; ; tripIndex++) {
                 if (tripIndex >= trips.size()) trips.add(new Trip());
                 Trip trip = trips.get(tripIndex);
-                if (trip.weightSum + w[stop] <= REAL_MAX_TRIP_WEIGHT) {
+                if (trip.weightSum + w[stop] <= MAX_TRIP_WEIGHT) {
                     trip.addStop(stop);
                     break;
                 }
@@ -548,7 +594,7 @@ public class SantaSolver {
             int bestCandidateInsertionPos = 0;
 
             for (Trip taker : trips) {
-                if (taker.weightSum + w[currId] > REAL_MAX_TRIP_WEIGHT)
+                if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
                     continue;
                 int takerBestPos = -1;
                 double takerBestPosInsertionVal = Integer.MIN_VALUE;
@@ -629,7 +675,7 @@ public class SantaSolver {
 
     boolean transferIndex(int index, Trip giver, Trip taker) {
         int currId = giver.getIdFromIndex(index);
-        if (taker.weightSum + w[currId] > REAL_MAX_TRIP_WEIGHT) return false;
+        if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT) return false;
         int prevId = giver.getIdFromIndex(index - 1);
         int nextId = giver.getIdFromIndex(index + 1);
         double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
@@ -720,7 +766,7 @@ public class SantaSolver {
         int currId = candidates.get(candidates.size() - 1);
         currTrip.addStop(currId);
 
-        double goal = UTZ_CLUSTER_GOAL * REAL_MAX_TRIP_WEIGHT;
+        double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
         while (true) {
             boolean change = false;
             for (int candidateId : candidates) {
@@ -858,7 +904,7 @@ public class SantaSolver {
                 if (currTrip.used[candidateId]) continue;
 
                 // Does candidate fit within weight bounds?
-                if (currTrip.weightSum + w[candidateId] > REAL_MAX_TRIP_WEIGHT) continue;
+                if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
 
                 // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
                 double sparsity = Double.POSITIVE_INFINITY;
@@ -872,7 +918,7 @@ public class SantaSolver {
                 double heuristicVal = sparsity;
 
                 // Add random to heuristic in order to explore many different options for this trip as this function is called many times
-                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * REAL_MAX_TRIP_WEIGHT) {
+                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
                     // Add random unless we are able to "complete" a trip with this stop
                     heuristicVal *= (1 + randomSize * rng.nextDouble());
                 }
@@ -904,7 +950,7 @@ public class SantaSolver {
         for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
             int candidateId = candidates.get(candidateIndex);
             if (currTrip.used[candidateId]) continue;
-            if (currTrip.weightSum + w[candidateId] > REAL_MAX_TRIP_WEIGHT) continue;
+            if (currTrip.weightSum + w[candidateId] > MAX_TRIP_WEIGHT) continue;
 
             double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
             double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
@@ -1371,7 +1417,7 @@ public class SantaSolver {
                     return false;
                 }
             }
-            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) {
+            if (trip.weightSum > MAX_TRIP_WEIGHT) {
                 System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
                 return false;
             }
@@ -1428,7 +1474,7 @@ public class SantaSolver {
 
             // Loneliness of node == radius needed to cluster this node so that sum of weight >= maxTripWeight
             int i = 0;
-            for (int sumOfWeight = 0; sumOfWeight < REAL_MAX_TRIP_WEIGHT; i++) {
+            for (int sumOfWeight = 0; sumOfWeight < MAX_TRIP_WEIGHT; i++) {
                 sumOfWeight += neighbors.get(i).val;
             }
             int furthestNeighborInCluster = neighbors.get(i).id;
@@ -1446,7 +1492,7 @@ public class SantaSolver {
     }
 
     double utz(Trip trip) {
-        return 1.0 * trip.weightSum / REAL_MAX_TRIP_WEIGHT;
+        return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
     }
 
     void printTrips(List<Trip> trips) {
@@ -1551,7 +1597,7 @@ public class SantaSolver {
         while (!ids.isEmpty()) {
             int id = ids.poll().id;
             Helper taker = q.poll();
-            if (taker.v + w[id] > REAL_MAX_TRIP_WEIGHT) {
+            if (taker.v + w[id] > MAX_TRIP_WEIGHT) {
                 System.out.println("Can't put id="+id+" (weight " + w[id] + " into taker " + taker.trip.tripId + " (weightSum " + taker.v + "), because weight sum would be " + (taker.v + w[id]));
                 return;
             }
@@ -1571,7 +1617,7 @@ public class SantaSolver {
             countOfNonEmptyTrips++;
         }
         double avgWeight = sumOfWeights * 1.0 / countOfNonEmptyTrips;
-        double avgFill = avgWeight / REAL_MAX_TRIP_WEIGHT;
+        double avgFill = avgWeight / MAX_TRIP_WEIGHT;
         return avgFill;
     }
 
