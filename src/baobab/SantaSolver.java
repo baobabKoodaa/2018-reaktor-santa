@@ -40,10 +40,12 @@ public class SantaSolver {
 
     // Simulated annealing
     boolean SA_IN_USE = false;
-    double maxTemperature = 100000.0;
-    double temperature = maxTemperature;
+    double temperatureAtRandomStart = 400000.0;
+    double temperatureAtJumpStart = 8000.0;
+    double temperatureAtOldValley = 1000;
+    double temperature = temperatureAtRandomStart;
     double coolingRate = 0.9999999;
-    double coolingReduction = 0.0001;
+    double coolingReduction = 0.001;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
@@ -53,18 +55,6 @@ public class SantaSolver {
     double freezeCheckMinimumDiff = 500000;
     double freezeConditionTemperatureMultiplier = 10;
     boolean REORDER_EXPERIMENT = true;
-
-    // Overfill (solution space expansion)
-    int maxTripWeight = REAL_MAX_TRIP_WEIGHT;
-    double PEAK_OVERFILL = 1.5;
-    double currOverfill = 1.0;
-    int overfillStatus = 0;
-    static int NO_OVERFILL = 0;
-    static int OVERFILL_WEIGHT_EXPANSION = 1;
-    static int OVERFILL_PENALTY_EXPANSION = 2;
-    double initialOverfillPenalty = 10;
-    double overfillPenalty = 0;
-    double overfillPenaltyModifier = 1.03;
 
     // Reduce print spam
     boolean verbose = false;
@@ -102,13 +92,12 @@ public class SantaSolver {
         int actionType = 7;
         if (args.length > 0) actionType = Integer.parseInt(args[0]);
 
-        if (actionType == 1) loadAndComparePreviousSolutions();
-        else if (actionType == 2) createRouteFromScratch();
-        else if (actionType == 3) foreverCreateRoutesFromScratch();
-        else if (actionType == 4) foreverImproveAnExistingRoute();
-        else if (actionType == 5) randomRouteHillClimb();
-        else if (actionType == 6) randomRouteSimulatedAnnealing();
-        else if (actionType == 7) jumpStartSimulatedAnnealing();
+             if (actionType == 1) loadAndComparePreviousSolutions();
+        else if (actionType == 3) createRoutesFromScratch();
+        else if (actionType == 4) digAHoleInOldValley();
+        else if (actionType == 5) hillClimbRandomRoute();
+        else if (actionType == 6) simulatedAnnealingRandomRoute();
+        else if (actionType == 7) simulatedAnnealingJumpStart();
     }
 
     // brutettu up-to-11 kokoset, parannus: +0.13% (eli jos exact solvataan yksittäisiä reittejä ni ehkä isommista enemmän parannusta vielä, 0.3% vois olla odotettu?
@@ -117,9 +106,11 @@ public class SantaSolver {
 
     // TODO GA trip plucking
 
-    //
+    void livenessExperiment() {
 
-    void randomRouteHillClimb() {
+    }
+
+    void hillClimbRandomRoute() {
         createBadRouteRandomly();
         while (true) {
             periodicals();
@@ -128,8 +119,9 @@ public class SantaSolver {
         }
     }
 
-    void randomRouteSimulatedAnnealing() {
+    void simulatedAnnealingRandomRoute() {
         createBadRouteRandomly();
+        temperature = temperatureAtRandomStart;
         SA_IN_USE = true;
         while (true) {
             periodicals();
@@ -138,10 +130,10 @@ public class SantaSolver {
         }
     }
 
-    void jumpStartSimulatedAnnealing() {
+    void simulatedAnnealingJumpStart() {
         createRouteFromScratch();
+        temperature = temperatureAtJumpStart;
         SA_IN_USE = true;
-        temperature = 13000;
         while (true) {
             periodicals();
             proposeRandomSwap();
@@ -163,7 +155,6 @@ public class SantaSolver {
         }
         //if (shakingNeeded()) {
         //    System.out.print("Freeze condition detected. ");
-        //    //shakeByOverfill();
         //    //shakeByTemperatureJump();
         //}
         if (REORDER_EXPERIMENT) reorderingExperiment();
@@ -175,21 +166,11 @@ public class SantaSolver {
     }
 
     boolean shakingNeeded() {
-        if (overfillStatus != NO_OVERFILL) {
-            // Previous shaking (by method of overfill) still going on
-            return false;
-        }
         double min = minScoreSinceLastFreezeCheck;
         double max = maxScoreSinceLastFreezeCheck;
         double diff = max - min;
         System.out.println("Checking for freeze condition... diff " + formatAnsValue(diff));
         return (diff < freezeCheckMinimumDiff);
-    }
-
-    void shakeByOverfill() {
-        System.out.println("Shaking by overfill...");
-        overfillStatus = OVERFILL_WEIGHT_EXPANSION;
-        updateOverfill(); // and every 1 second along with status prints
     }
 
     void shakeByTemperatureJump() {
@@ -198,9 +179,9 @@ public class SantaSolver {
         //probabilisticDetachment();
     }
 
-    void foreverImproveAnExistingRoute() throws FileNotFoundException {
+    void digAHoleInOldValley() throws FileNotFoundException {
         SA_IN_USE = true;
-        temperature = 600.0; // Need lower than default temperature
+        temperature = temperatureAtOldValley;
         Double val = loadSolution(getFilePath("run224\\santamap33"));
         if (val == null) return;
 
@@ -415,17 +396,11 @@ public class SantaSolver {
         if (stop1id == stop2id)
             return;
         if (trip1 != trip2) {
-            long potentialTrip1Weight = trip1.weightSum + w[stop2id] - w[stop1id];
-            long potentialTrip2Weight = trip2.weightSum + w[stop1id] - w[stop2id];
-            if (potentialTrip1Weight > maxTripWeight) return;
-            if (potentialTrip2Weight > maxTripWeight) return;
+            if (trip1.weightSum + w[stop2id] - w[stop1id] > REAL_MAX_TRIP_WEIGHT) return;
+            if (trip2.weightSum + w[stop1id] - w[stop2id] > REAL_MAX_TRIP_WEIGHT) return;
             double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
             double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
             double proposalVal = replacementVal1 + replacementVal2;
-            if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
-                proposalVal += getOverfillVal(trip1.weightSum, potentialTrip1Weight);
-                proposalVal += getOverfillVal(trip2.weightSum, potentialTrip2Weight);
-            }
             if (acceptProposal(proposalVal)) {
                 trip1.addStop(stop1index, stop2id);
                 trip2.addStop(stop2index, stop1id);
@@ -452,30 +427,14 @@ public class SantaSolver {
         int giverIndex = rng.nextInt(giver.size());
         int takerIndex = rng.nextInt(taker.size() + 1);
         int stealId = giver.getIdFromIndex(giverIndex);
-        long potentialTakerWeight = taker.weightSum + w[stealId];
-        if (potentialTakerWeight > maxTripWeight) return;
+        if (taker.weightSum + w[stealId] > REAL_MAX_TRIP_WEIGHT) return;
         double removalVal = giver.getRemovalVal(giverIndex);
         double insertionVal = taker.getInsertionVal(stealId, takerIndex);
         double proposalVal = removalVal + insertionVal;
-        if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
-            long potentialGiverWeight = giver.weightSum - w[stealId];
-            proposalVal += getOverfillVal(giver.weightSum, potentialGiverWeight);
-            proposalVal += getOverfillVal(taker.weightSum, potentialTakerWeight);
-        }
         if (acceptProposal(proposalVal)) {
             taker.addStop(takerIndex, stealId);
             giver.removeIndex(giverIndex);
         }
-    }
-
-    double getOverfillVal(long oldW, long newW) {
-        if (Math.max(oldW, newW) > REAL_MAX_TRIP_WEIGHT) {
-            oldW = Math.max(oldW, REAL_MAX_TRIP_WEIGHT);
-            newW = Math.max(newW, REAL_MAX_TRIP_WEIGHT);
-            double diff = oldW - newW;
-            return diff * overfillPenalty;
-        }
-        return 0;
     }
 
     boolean acceptProposal(double proposalVal) {
@@ -484,8 +443,7 @@ public class SantaSolver {
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
             lastPvalProposalVal = proposalVal;
-            if (rng.nextDouble() < coolingReduction)
-                temperature *= coolingRate;
+            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
             boolean accepted = (P >= rng.nextDouble());
             if (accepted) SAcount[1]++;
             else SAcount[0]++;
@@ -510,27 +468,13 @@ public class SantaSolver {
             for (int tripIndex = 0; ; tripIndex++) {
                 if (tripIndex >= trips.size()) trips.add(new Trip());
                 Trip trip = trips.get(tripIndex);
-                if (trip.weightSum + w[stop] <= maxTripWeight) {
+                if (trip.weightSum + w[stop] <= REAL_MAX_TRIP_WEIGHT) {
                     trip.addStop(stop);
                     break;
                 }
             }
         }
         addEmptyTrips();
-    }
-
-
-    void shuffleAndSortIndividualTrips() {
-        // This seems to absolutely murder results
-        double valAtStart = calcScore(trips);
-        for (Trip trip : trips) {
-            Collections.shuffle(trip.ids);
-            nnTSP(trip);
-            localSearchOrderOfIndividualTrip(trip);
-        }
-        double valAtEnd = calcScore(trips);
-        double diff = valAtStart - valAtEnd;
-        System.out.println(formatAnsValue(valAtEnd) + "(" + formatAnsValue(diff) + ") by shuffleAndSort");
     }
 
     void nnTSP(Trip trip) {
@@ -608,7 +552,7 @@ public class SantaSolver {
             int bestCandidateInsertionPos = 0;
 
             for (Trip taker : trips) {
-                if (taker.weightSum + w[currId] > maxTripWeight)
+                if (taker.weightSum + w[currId] > REAL_MAX_TRIP_WEIGHT)
                     continue;
                 int takerBestPos = -1;
                 double takerBestPosInsertionVal = Integer.MIN_VALUE;
@@ -694,8 +638,7 @@ public class SantaSolver {
 
     boolean transferIndex(int index, Trip giver, Trip taker) {
         int currId = giver.getIdFromIndex(index);
-        if (taker.weightSum + w[currId] > maxTripWeight)
-            return false;
+        if (taker.weightSum + w[currId] > REAL_MAX_TRIP_WEIGHT) return false;
         int prevId = giver.getIdFromIndex(index - 1);
         int nextId = giver.getIdFromIndex(index + 1);
         double removalVal = (dist[prevId][currId] + dist[currId][nextId]) - dist[prevId][nextId];
@@ -723,7 +666,7 @@ public class SantaSolver {
     }
 
 
-    void foreverCreateRoutesFromScratch() {
+    void createRoutesFromScratch() {
         while (true) {
             createRouteFromScratch();
         }
@@ -786,7 +729,7 @@ public class SantaSolver {
         int currId = candidates.get(candidates.size() - 1);
         currTrip.addStop(currId);
 
-        double goal = UTZ_CLUSTER_GOAL * maxTripWeight;
+        double goal = UTZ_CLUSTER_GOAL * REAL_MAX_TRIP_WEIGHT;
         while (true) {
             boolean change = false;
             for (int candidateId : candidates) {
@@ -921,12 +864,10 @@ public class SantaSolver {
                 int candidateId = candidates.get(candidateIndex);
 
                 // Is candidate already used within this trip?
-                if (currTrip.used[candidateId])
-                    continue;
+                if (currTrip.used[candidateId]) continue;
 
                 // Does candidate fit within weight bounds?
-                if (currTrip.weightSum + w[candidateId] > maxTripWeight)
-                    continue;
+                if (currTrip.weightSum + w[candidateId] > REAL_MAX_TRIP_WEIGHT) continue;
 
                 // Does candidate fit within sparsity bounds? Sparsity == Min of dists to any previous stop within trip
                 double sparsity = Double.POSITIVE_INFINITY;
@@ -934,14 +875,13 @@ public class SantaSolver {
                     sparsity = Math.min(sparsity, dist[id][candidateId]);
                 }
 
-                if (sparsity > maxSparsity)
-                    continue;
+                if (sparsity > maxSparsity) continue;
 
                 // Calculate heuristic value for candidate
                 double heuristicVal = sparsity;
 
                 // Add random to heuristic in order to explore many different options for this trip as this function is called many times
-                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * maxTripWeight) {
+                if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * REAL_MAX_TRIP_WEIGHT) {
                     // Add random unless we are able to "complete" a trip with this stop
                     heuristicVal *= (1 + randomSize * rng.nextDouble());
                 }
@@ -956,8 +896,7 @@ public class SantaSolver {
                 }
 
             }
-            if (bestIndex < 0)
-                break; // Impossible to expand cluster further (due to weight/sparsity)
+            if (bestIndex < 0) break; // Impossible to expand cluster further (due to weight/sparsity)
 
             // Add closest node to cluster
             indicesForCurrTrip.add(bestIndex);
@@ -973,10 +912,8 @@ public class SantaSolver {
     void collectDetours(int closest1, int closest2, double sparsity, double detourModifier) {
         for (int candidateIndex = candidates.size() - 2; candidateIndex >= 0; candidateIndex--) {
             int candidateId = candidates.get(candidateIndex);
-            if (currTrip.used[candidateId])
-                continue;
-            if (currTrip.weightSum + w[candidateId] > maxTripWeight)
-                continue;
+            if (currTrip.used[candidateId]) continue;
+            if (currTrip.weightSum + w[candidateId] > REAL_MAX_TRIP_WEIGHT) continue;
 
             double detourCost1 = dist[closest1][candidateId] + dist[candidateId][1] - dist[closest1][1];
             double detourCost2 = dist[closest2][candidateId] + dist[candidateId][1] - dist[closest2][1];
@@ -1154,7 +1091,7 @@ public class SantaSolver {
 
             // Loneliness of node == radius needed to cluster this node so that sum of weight >= maxTripWeight
             int i = 0;
-            for (int sumOfWeight = 0; sumOfWeight < maxTripWeight; i++) {
+            for (int sumOfWeight = 0; sumOfWeight < REAL_MAX_TRIP_WEIGHT; i++) {
                 sumOfWeight += neighbors.get(i).val;
             }
             int furthestNeighborInCluster = neighbors.get(i).id;
@@ -1338,7 +1275,7 @@ public class SantaSolver {
                     return false;
                 }
             }
-            if (trip.weightSum > maxTripWeight) {
+            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) {
                 System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
                 return false;
             }
@@ -1361,7 +1298,6 @@ public class SantaSolver {
         if (timeNow > lastScorePrintTime + 1000) {
             double scoreNow = calcScore(trips);
             updateFreezeCheck(scoreNow);
-            updateOverfill();
             printStatus(scoreNow);
         }
     }
@@ -1369,49 +1305,6 @@ public class SantaSolver {
     void updateFreezeCheck(double scoreNow) {
         minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
         maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
-    }
-
-
-    int temp = 0;
-    void updateOverfill() {
-        if (overfillStatus == OVERFILL_WEIGHT_EXPANSION) {
-            // experimental
-            currOverfill = PEAK_OVERFILL;
-            if (temp == 0) {
-            //if (averageFill(trips) < 1+(PEAK_OVERFILL-1)/4) {
-                temp++;
-
-            //if (currOverfill < PEAK_OVERFILL) {
-                // Slowly allow trips to have more and more overfill.
-                //currOverfill += 0.01;
-                maxTripWeight = (int) (REAL_MAX_TRIP_WEIGHT * currOverfill);
-            }
-            else {
-                // Max overfill reached. Go into penalty expansion mode.
-                overfillStatus = OVERFILL_PENALTY_EXPANSION;
-                overfillPenalty = initialOverfillPenalty;
-            }
-        } else if (overfillStatus == OVERFILL_PENALTY_EXPANSION) {
-            if (countTripsWithOverfill(trips) > 0) {
-                // Slowly increase penalty for overfill.
-                overfillPenalty *= overfillPenaltyModifier;
-            } else {
-                // We have got rid of all the overfill so we can reset variables.
-                currOverfill = 1;
-                overfillStatus = NO_OVERFILL;
-                overfillPenalty = 0;
-                maxTripWeight = REAL_MAX_TRIP_WEIGHT;
-                freezeCheckLastTime = System.currentTimeMillis(); // Bumping this to avoid re-shaking too fast
-            }
-        }
-    }
-
-    int countTripsWithOverfill(List<Trip> trips) {
-        int count = 0;
-        for (Trip trip : trips) {
-            if (trip.weightSum > REAL_MAX_TRIP_WEIGHT) count++;
-        }
-        return count;
     }
 
     double averageFill(List<Trip> trips) {
@@ -1429,12 +1322,12 @@ public class SantaSolver {
 
     void printStatus(double curr) {
         long now = System.currentTimeMillis();
-        if (overfillStatus == NO_OVERFILL) assertSolutionValid();
+        assertSolutionValid();
         double prev = lastPrintedScore;
         double diff = prev - curr;
         String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
         lastPrintedScore = curr;
-        if (curr < lowestKnownScore && overfillStatus == NO_OVERFILL) {
+        if (curr < lowestKnownScore) {
             timeWhenBestScoreReached = now;
             lowestKnownScore = curr;
         }
@@ -1455,15 +1348,6 @@ public class SantaSolver {
                     + " (Temperature " + Math.round(temperature) + ")"
             ;
             SAcount = new int[2];
-        }
-        if (overfillStatus != NO_OVERFILL) {
-            System.out.print("!");
-            extras += (" | ")
-                    + "Overfill in " + countTripsWithOverfill(trips) + " trips, "
-                    + "average fill " + formatPercent(averageFill(trips))
-                    + ", maxTripWeight=" + maxTripWeight
-                    + ", overfillPenalty=" + overfillPenalty;
-            ;
         }
         System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
         lastScorePrintTime = now;
@@ -1559,7 +1443,6 @@ public class SantaSolver {
             throw new RuntimeException("Save folder not defined!");
         }
         if (trips.isEmpty()) throw new RuntimeException("Empty ans given in writeOutput call");
-        if (overfillStatus != NO_OVERFILL) return; // Don't save until we are back to a valid solution
         if (!isSolutionValid(trips)) throw new RuntimeException("Attempted to save invalid solution.");
         double val = calcScore(trips);
         if (val + 0.0001 >= bestSavedScore) {
@@ -1592,7 +1475,7 @@ public class SantaSolver {
     /********************************** UTILITIES ***************************************/
 
     double utz(Trip trip) {
-        return 1.0 * trip.weightSum / maxTripWeight;
+        return 1.0 * trip.weightSum / REAL_MAX_TRIP_WEIGHT;
     }
 
     void printTrips(List<Trip> trips) {
@@ -1697,7 +1580,7 @@ public class SantaSolver {
         while (!ids.isEmpty()) {
             int id = ids.poll().id;
             Helper taker = q.poll();
-            if (taker.v + w[id] > maxTripWeight) {
+            if (taker.v + w[id] > REAL_MAX_TRIP_WEIGHT) {
                 System.out.println("Can't put id="+id+" (weight " + w[id] + " into taker " + taker.trip.tripId + " (weightSum " + taker.v + "), because weight sum would be " + (taker.v + w[id]));
                 return;
             }
