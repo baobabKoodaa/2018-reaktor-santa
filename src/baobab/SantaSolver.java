@@ -505,7 +505,7 @@ public class SantaSolver {
         // Order candidates mainly based on distance from Santa
         List<IDval> sortHelper = new ArrayList<>();
         for (int id = 2; id < endId; id++) {
-            double heuristicVal = dist[1][id] + rng.nextInt(20000);
+            double heuristicVal = dist[1][id];//TODO palauta + rng.nextInt(20000);
             sortHelper.add(new IDval(id, heuristicVal));
         }
         Collections.sort(sortHelper);
@@ -513,10 +513,16 @@ public class SantaSolver {
             candidates.add(pair.id);
         }
 
-        // Create trips
+        // Create trips REAL
+//        while (!candidates.isEmpty()) {
+//            createTrip();
+//        }
+
+        // Create trips EXPERIMENTAL
         while (!candidates.isEmpty()) {
-            createTrip();
+            createLaakeriTrip();
         }
+        assertSolutionValid();
 
         System.out.println("Route value " + formatAnsValue(sol.calcScore()));
         writeAnsToFile(sol);
@@ -568,6 +574,84 @@ public class SantaSolver {
                 change = true;
             }
             if (!change) return false;
+        }
+    }
+
+    void createLaakeriTrip() {
+        Trip trip = new Trip(0);
+        List<Integer> indicesForRemoval = new ArrayList<>();
+
+        // Otetaan kaukaisin piste
+        int target1Index = candidates.size() - 1;
+        int target1Id = candidates.get(target1Index);
+        targetDist = dist[1][target1Id];
+        trip.addId(target1Id);
+        indicesForRemoval.add(target1Index);
+
+        // Otetaan sen läheltä toinen piste
+        int target2Index = target1Index;
+        int target2Id = target1Id;
+        double minDist = Double.POSITIVE_INFINITY;
+        if (candidates.size() > 1) {
+            // Etsitään lähimpänä oleva piste
+            for (int i=0; i<candidates.size()-1; i++) {
+                int id = candidates.get(i);
+                double currDist = dist[target1Id][id];
+                if (currDist < minDist) {
+                    target2Index = i;
+                    target2Id = candidates.get(target2Index);
+                    minDist = currDist;
+                }
+            }
+            // Otetaan se
+            trip.addId(target2Id);
+            indicesForRemoval.add(target2Index);
+        }
+
+        // Järjestetään pisteet sen mukaan mikä niiden etäisyys on tähän nykyiseen touriin
+        List<IDval> ordered = new ArrayList<>();
+        for (int i=0; i<candidates.size(); i++) {
+            int id = candidates.get(i);
+            if (i == target1Index) continue;
+            if (i == target2Index) continue;
+            double dist1 = dist[target1Id][id];
+            double dist2 = dist[target2Id][id];
+            minDist = Math.min(dist1, dist2);
+            ordered.add(new IDval(i, minDist));
+        }
+        Collections.sort(ordered);
+
+        // Otetaan siinä järjestyksessä kaikki mitä voi
+        for (IDval candidate : ordered) {
+            int candidateIndex = candidate.id;
+            int candidateId = candidates.get(candidateIndex);
+            if (trip.weightSum + w[candidateId] <= MAX_TRIP_WEIGHT) {
+                trip.addId(candidateId);
+                indicesForRemoval.add(candidateIndex);
+            }
+        }
+
+        // Add current trip to route.
+        trip.updateMeters();
+        sol.addExistingTripAndFixItsId(trip);
+        weightRemaining -= trip.weightSum;
+
+        // Print statistics of this trip
+        if (verbose) {
+            System.out.println(
+                    "Trip #" + sol.trips.size() +
+                            " overall " + Math.round(trip.meters / 1000) + "km, " +
+                            "target " + Math.round(targetDist / 1000) + "km, " +
+                            "detours " + Math.round((trip.meters - 2 * targetDist) / 1000) + "km, " +
+                            trip.size() + " stops, " +
+                            "utz " + utz(trip)
+            );
+        }
+
+        // Remove selected from candidates
+        Collections.sort(indicesForRemoval, Collections.reverseOrder()); // Need to delete in reverse order
+        for (int index : indicesForRemoval) {
+            candidates.remove(index);
         }
     }
 
