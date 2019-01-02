@@ -4,6 +4,7 @@ import java.util.*;
 
 import static baobab.SantaSolver.*;
 
+/** Helper class to contain a solution created by SantaSolver. */
 public class Solution {
 
     List<Trip> trips;
