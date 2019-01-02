@@ -99,48 +99,53 @@ public class SantaSolver {
 
     /********************************** Some interesting modes ***************************************/
 
-    void simulatedAnnealingRandomRoute() {
+    void hillClimbRandomRoute() {
+        temperature = 0;
         createBadRouteRandomly();
+        improveForever();
+    }
+
+    void simulatedAnnealingRandomRoute() {
         temperature = TEMPERATURE_RANDOM_START;
-        while (true) {
-            periodicals();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
-        }
+        createBadRouteRandomly();
+        improveForever();
     }
 
     void simulatedAnnealingJumpStart() {
-        createRouteFromScratch();
         temperature = TEMPERATURE_JUMP_START;
-        while (true) {
-            periodicals();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
-        }
+        createRouteFromScratch();
+        improveForever();
     }
 
     /** Load previous solution from file, try different things to improve upon it. */
     void digAHoleInOldValley() throws FileNotFoundException {
-        Double val = loadSolution(getFilePath("run237\\santamap52"));
+        Double val = loadSolution(getFilePath("run230\\santamap16"));
         if (val == null) return;
 
         temperature = TEMPERATURE_OLD_VALLEY;
         REORDER_EXPERIMENT = true;
 
-        periodicals();
+        oncePerSecondUpdates();
         reorderingExperiment();
         localSearchOrderOfIndividualTrips(sol);
         optimalStealsAsLongAsPossible();
         localSearchOrderOfIndividualTrips(sol);
 
-        while (true) {
-            periodicals();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
-        }
+        improveForever();
     }
 
     /********************************** Most interesting optimization methods ***************************************/
+
+    void improveForever() {
+        while (true) {
+            oncePerSecondUpdates();
+            //periodicallyShakeIfNeeded();
+            //periodicallySave();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
+            tryToExecuteRandomSegmentReversal();
+        }
+    }
 
     /** Consider swapping 2 random nodes (possibly from different trips). */
     void tryToExecuteRandomSwap() {
@@ -201,6 +206,36 @@ public class SantaSolver {
         if (acceptProposal(proposalVal)) {
             taker.addId(takerIndex, stealId);
             giver.removeIndex(giverIndex);
+        }
+    }
+
+    /** Consider reversing a random segment of a random trip. */
+    void tryToExecuteRandomSegmentReversal() {
+        Trip trip = sol.trips.get(rng.nextInt(sol.trips.size()));
+        if (trip.isEmpty()) return;
+        int rx = rng.nextInt(trip.size());
+        int ry = rng.nextInt(trip.size());
+        if (rx == ry) return;
+        int r1 = Math.min(rx, ry);
+        int r2 = Math.max(rx, ry);
+
+        int id0 = trip.getIdFromIndex(r1-1);
+        int id1 = trip.getIdFromIndex(r1);
+        int id2 = trip.getIdFromIndex(r2);
+        int id3 = trip.getIdFromIndex(r2+1);
+
+        double oldDist = dist[id0][id1] + dist[id2][id3];
+        double newDist = dist[id0][id2] + dist[id1][id3];
+        double proposalVal = oldDist - newDist;
+        if (acceptProposal(proposalVal)) {
+            int from = r2;
+            int to = r1;
+            while (from > to) {
+                int id = trip.ids.remove(from);
+                trip.ids.add(to, id);
+                //System.out.println("    Moved id " + id + " to position " + to);
+                to++;
+            }
         }
     }
 
@@ -268,12 +303,6 @@ public class SantaSolver {
         }
     }
 
-    void periodicals() {
-        oncePerSecondUpdates();
-        periodicallyShakeIfNeeded();
-        periodicallySave();
-    }
-
     void oncePerSecondUpdates() {
         long timeNow = System.currentTimeMillis();
         if (timeNow > lastScorePrintTime + 1000) {
@@ -310,13 +339,11 @@ public class SantaSolver {
 
         int sumSA = sol.SAcount[0] + sol.SAcount[1];
         String extras = "";
-        if (temperature == 0) {
-            extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
-                    + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
-                    + " (Temperature " + Math.round(temperature) + ")"
-            ;
-            sol.SAcount = new int[2];
-        }
+        extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
+                + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
+                + " (Temperature " + Math.round(temperature) + ")"
+        ;
+        sol.SAcount = new int[2];
         System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
         lastScorePrintTime = now;
     }
@@ -445,7 +472,7 @@ public class SantaSolver {
                         if (taker == giver) continue;
                         for (int i = 0; i < giver.size(); i++) {
                             if (transferIndex(i, giver, taker)) {
-                                periodicals();
+                                oncePerSecondUpdates();
                                 takerImproved = true;
                             }
                         }
@@ -513,14 +540,9 @@ public class SantaSolver {
             candidates.add(pair.id);
         }
 
-        // Create trips REAL
-//        while (!candidates.isEmpty()) {
-//            createTrip();
-//        }
-
-        // Create trips EXPERIMENTAL
         while (!candidates.isEmpty()) {
-            createLaakeriTrip();
+            createTrip();
+            //createLaakeriTrip();
         }
         assertSolutionValid();
 
@@ -630,6 +652,10 @@ public class SantaSolver {
                 indicesForRemoval.add(candidateIndex);
             }
         }
+
+        trip.updateMeters();
+        tryToReorder(trip);
+        localSearchOrderOfIndividualTrip(trip);
 
         // Add current trip to route.
         trip.updateMeters();
@@ -1233,15 +1259,6 @@ public class SantaSolver {
 
             // Increase fork time as going gets tougher
             X *= 1.02;
-        }
-    }
-
-    void hillClimbRandomRoute() {
-        createBadRouteRandomly();
-        while (true) {
-            periodicals();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
         }
     }
 
