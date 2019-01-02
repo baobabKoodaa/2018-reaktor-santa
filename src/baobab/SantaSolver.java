@@ -5,22 +5,23 @@ import java.text.DecimalFormat;
 import java.text.NumberFormat;
 import java.util.*;
 
+/** Don't instantiate more than 1 instance. */
 public class SantaSolver {
 
     // Constants from problem statement
-    static double SANTA_HOME_LATITUDE = 68.073611;
-    static double SANTA_HOME_LONGITUDE = 29.315278;
-    static int MAX_TRIP_WEIGHT = 10000000;
+    public static final double SANTA_HOME_LATITUDE = 68.073611;
+    public static final double SANTA_HOME_LONGITUDE = 29.315278;
+    public static final int MAX_TRIP_WEIGHT = 10000000;
 
     // Input will be read into these variables
-    int endId;
-    double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
-    int[] w; // weights
-    long sumOfAllWeights;
-    double[][] dist;
+    public static int endId;
+    public static double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
+    public static int[] w; // weights
+    public static long sumOfAllWeights;
+    public static double[][] dist;
 
     // Current solution state
-    Solution sol;
+    public static Solution sol;
 
     // Route creation variables
     List<Integer> candidates;
@@ -37,17 +38,17 @@ public class SantaSolver {
     double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower
 
     // Simulated annealing
-    boolean SA_IN_USE = false;
+    public static boolean SA_IN_USE = false;
     double temperatureAtRandomStart = 400000.0;
-    double temperatureAtJumpStart = 8000.0;
+    double temperatureAtJumpStart = 6000.0;
     double temperatureAtOldValley = 1000;
     double temperature = temperatureAtRandomStart;
     double coolingRate = 0.9999999;
-    double coolingReduction = 0.007;
+    double coolingReduction = 0.004;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
-    long freezeCheckIntervalSeconds = 65;
+    long freezeCheckIntervalSeconds = 61;
     double minScoreSinceLastFreezeCheck = Double.POSITIVE_INFINITY;
     double maxScoreSinceLastFreezeCheck = Double.NEGATIVE_INFINITY;
     double freezeCheckMinimumDiff = 500000;
@@ -85,120 +86,24 @@ public class SantaSolver {
         rng = new Random(seed);
         System.out.println("Seeding random with " + seed);
 
-        int actionType = 7;
-        if (args.length > 0) actionType = Integer.parseInt(args[0]);
+        int mode = 7;
+        if (args.length > 0) mode = Integer.parseInt(args[0]);
 
-             if (actionType == 1) loadAndComparePreviousSolutions();
-        else if (actionType == 3) createRoutesFromScratch();
-        else if (actionType == 4) digAHoleInOldValley();
-        else if (actionType == 5) hillClimbRandomRoute();
-        else if (actionType == 6) simulatedAnnealingRandomRoute();
-        else if (actionType == 7) simulatedAnnealingJumpStart();
-        else if (actionType == 8) livenessExperiment();
+             if (mode == 1) loadAndComparePreviousSolutions();
+        else if (mode == 3) createRoutesFromScratch();
+        else if (mode == 4) digAHoleInOldValley();
+        else if (mode == 5) hillClimbRandomRoute();
+        else if (mode == 6) simulatedAnnealingRandomRoute();
+        else if (mode == 7) simulatedAnnealingJumpStart();
+        else if (mode == 8) livenessExperiment();
     }
 
-    // brutettu up-to-11 kokoset, parannus: +0.13% (eli jos exact solvataan yksittäisiä reittejä ni ehkä isommista enemmän parannusta vielä, 0.3% vois olla odotettu?
-
-    // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
-
-    void livenessExperiment() {
-        //createBadRouteRandomly();
-        createRouteFromScratch();
-        SA_IN_USE = true;
-        temperature = temperatureAtJumpStart;
-        long X = 10000;
-        while (true) {
-            double meters = sol.calcScore();
-            double metersBeforeFork = meters;
-            printStatus(meters);
-            periodicallySave();
-
-            double temperatureBeforeFork = temperature;
-            Solution beforeFork = sol.getCopy();
-
-            // Run first fork here to set goalMeters based on how far a single fork gets in X milliseconds.
-            long firstForkEndTime = System.currentTimeMillis() + X;
-            while (System.currentTimeMillis() < firstForkEndTime) {
-                for (int i=0; i<50000; i++) {
-                    tryToExecuteRandomSteal();
-                    tryToExecuteRandomSwap();
-                }
-            }
-            meters = sol.calcScore();
-            int liveness = sol.calcLiveness();
-            int bestForkLiveness = liveness;
-            Solution bestForkSolution = sol;
-            System.out.println("        Fork 1: " + formatAnsValue(meters) + " meters " + liveness + " liveness, goaltime: " + formatElapsedTime(X));
-            double goalMeters = meters;
-
-            // Collect statistics on forks
-            int sumOfLivenesses = bestForkLiveness;
-            int countOfAcceptableForks = 1;
-
-            // Run other forks until each one reaches goalMeters
-            for (int fork=2; fork<=5; fork++) {
-                sol = beforeFork.getCopy();
-                temperature = temperatureBeforeFork;
-                meters = metersBeforeFork;
-
-                long forkStartTime = System.currentTimeMillis();
-                long expectedForkEndTime = forkStartTime + X;
-                int countLoop = 0;
-                while (meters > goalMeters) {
-                    for (int i=0; i<50000; i++) {
-                        tryToExecuteRandomSteal();
-                        tryToExecuteRandomSwap();
-                        countLoop++;
-                    }
-                    long now = System.currentTimeMillis();
-                    if (now > 0.5 * expectedForkEndTime) {
-                        // Speedup by not calculating this all the time
-                        meters = sol.calcScore();
-                        if (now > expectedForkEndTime+X) {
-                            // Timeout if we can't reach comparable solution in 2 times fork 1 time
-                            break;
-                        }
-                    }
-                }
-                if (meters > goalMeters) {
-                    // Uncomparable (worse) solution reached despite using much more time.
-                    continue;
-                }
-                liveness = sol.calcLiveness();
-                sumOfLivenesses += liveness;
-                countOfAcceptableForks++;
-                System.out.println("        Fork " + fork + ": " + formatAnsValue(meters) + " meters " + liveness + " liveness, time spent: " + formatElapsedTime(System.currentTimeMillis() - forkStartTime) + " (looped " + countLoop + " times)");
-                if (liveness > bestForkLiveness) {
-                    bestForkLiveness = liveness;
-                    bestForkSolution = sol;
-                }
-            }
-
-            // Choose best fork to continue search
-            sol = bestForkSolution;
-            System.out.println("Chose fork with liveness " + bestForkLiveness + " (average " + (sumOfLivenesses*1.0/countOfAcceptableForks) + ")");
-
-            // Shake every now and then
-            if (rng.nextDouble() < 0.1) reorderingExperiment();
-
-            // Increase fork time as going gets tougher
-            X *= 1.01;
-        }
-    }
-
-    void hillClimbRandomRoute() {
-        createBadRouteRandomly();
-        while (true) {
-            periodicals();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
-        }
-    }
+    /********************************** Some interesting modes ***************************************/
 
     void simulatedAnnealingRandomRoute() {
         createBadRouteRandomly();
-        temperature = temperatureAtRandomStart;
         SA_IN_USE = true;
+        temperature = temperatureAtRandomStart;
         while (true) {
             periodicals();
             tryToExecuteRandomSwap();
@@ -208,13 +113,216 @@ public class SantaSolver {
 
     void simulatedAnnealingJumpStart() {
         createRouteFromScratch();
-        temperature = temperatureAtJumpStart;
         SA_IN_USE = true;
+        temperature = temperatureAtJumpStart;
         while (true) {
             periodicals();
             tryToExecuteRandomSwap();
             tryToExecuteRandomSteal();
         }
+    }
+
+    /** Load previous solution from file, try different things to improve upon it. */
+    void digAHoleInOldValley() throws FileNotFoundException {
+        Double val = loadSolution(getFilePath("run237\\santamap52"));
+        if (val == null) return;
+
+        SA_IN_USE = true;
+        temperature = temperatureAtOldValley;
+        REORDER_EXPERIMENT = true;
+
+        periodicals();
+        reorderingExperiment();
+        localSearchOrderOfIndividualTrips(sol);
+        optimalStealsAsLongAsPossible();
+        localSearchOrderOfIndividualTrips(sol);
+
+        while (true) {
+            periodicals();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
+        }
+    }
+
+    /********************************** Most interesting optimization methods ***************************************/
+
+    /** Consider swapping 2 random nodes (possibly from different trips). */
+    void tryToExecuteRandomSwap() {
+        Trip trip1 = sol.trips.get(rng.nextInt(sol.trips.size()));
+        Trip trip2 = sol.trips.get(rng.nextInt(sol.trips.size()));
+        if (trip1.isEmpty() || trip2.isEmpty()) return;
+        int node1index = rng.nextInt(trip1.size());
+        int node2index = rng.nextInt(trip2.size());
+        int node1id = trip1.getIdFromIndex(node1index);
+        int node2id = trip2.getIdFromIndex(node2index);
+        if (node1id == node2id) return;
+        double swapVal = getSwapValue(trip1, trip2, node1index, node2index);
+        if (acceptProposal(swapVal)) {
+            if (trip1 != trip2) {
+                trip1.addId(node1index, node2id);
+                trip2.addId(node2index, node1id);
+                trip1.removeId(node1id);
+                trip2.removeId(node2id);
+            } else {
+                Trip trip = trip1;
+                trip.removeIndex(node1index);
+                trip.addId(node1index, node2id);
+                trip.removeIndex(node2index);
+                trip.addId(node2index, node1id);
+            }
+        }
+    }
+
+    /** Swap value in meters if swap were to be executed. Positive is good. */
+    public static double getSwapValue(Trip trip1, Trip trip2, int node1index, int node2index) {
+        int node1id = trip1.getIdFromIndex(node1index);
+        int node2id = trip2.getIdFromIndex(node2index);
+        if (node1id == node2id) return 0;
+        if (trip1 != trip2) {
+            if (trip1.weightSum + w[node2id] - w[node1id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
+            if (trip2.weightSum + w[node1id] - w[node2id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
+            double replacementVal1 = trip2.getReplacementVal(node1id, node2index);
+            double replacementVal2 = trip1.getReplacementVal(node2id, node1index);
+            return replacementVal1 + replacementVal2;
+        } else {
+            return trip1.getSwapVal(node1index, node2index);
+        }
+    }
+
+    /** Consider moving 1 random node to a random position in a random trip. */
+    void tryToExecuteRandomSteal() {
+        Trip giver = sol.trips.get(rng.nextInt(sol.trips.size()));
+        Trip taker = sol.trips.get(rng.nextInt(sol.trips.size()));
+        if (giver.isEmpty()) return;
+        if (giver == taker) return;
+        int giverIndex = rng.nextInt(giver.size());
+        int takerIndex = rng.nextInt(taker.size() + 1);
+        int stealId = giver.getIdFromIndex(giverIndex);
+        if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT) return;
+        double removalVal = giver.getRemovalVal(giverIndex);
+        double insertionVal = taker.getInsertionVal(stealId, takerIndex);
+        double proposalVal = removalVal + insertionVal;
+        if (acceptProposal(proposalVal)) {
+            taker.addId(takerIndex, stealId);
+            giver.removeIndex(giverIndex);
+        }
+    }
+
+    /** Positive valued proposals always accepted. Negative proposals sometimes, if using Simulated Annealing. */
+    boolean acceptProposal(double proposalVal) {
+        if (proposalVal < -999999999999.9) return false; // just a speedup
+        if (SA_IN_USE) {
+            if (proposalVal >= 0) return true;
+            double P = Math.exp(proposalVal / temperature);
+            lastPval = P;
+            lastPvalProposalVal = proposalVal;
+            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
+            boolean accepted = (P >= rng.nextDouble());
+            if (accepted) sol.SAcount[1]++;
+            else sol.SAcount[0]++;
+            return accepted;
+        } else {
+            // Default: hill climb.
+            return (proposalVal >= 0);
+        }
+    }
+
+    /********************************** Less interesting optimization methods ***************************************/
+
+    void localSearchOrderOfIndividualTrips(Solution trips) {
+        for (Trip trip : trips.trips) {
+            localSearchOrderOfIndividualTrip(trip);
+        }
+    }
+
+    /** Local search the order within a single trip to a local optima. (Used also as part of heuristic route creation.) */
+    void localSearchOrderOfIndividualTrip(Trip trip) {
+        if (trip.isEmpty()) return;
+        int n = trip.size();
+        int fromIndex = 0;
+        for (int countWithoutUpdate = 0; countWithoutUpdate <= n; ) {
+            int id = trip.getIdFromIndex(fromIndex);
+            double removalVal = trip.getRemovalVal(fromIndex);
+            int bestIndex = fromIndex;
+            double bestPosVal = 0;
+            for (int toIndex = 0; toIndex <= n; toIndex++) {
+                if (toIndex == fromIndex)
+                    continue; // displaces itself and causes bugs
+                if (toIndex == fromIndex + 1)
+                    continue; // this would also displace itself and cause bugs
+
+                double insertionVal = trip.getInsertionVal(id, toIndex);
+                double val = insertionVal + removalVal;
+                if (val > bestPosVal) {
+                    bestPosVal = val;
+                    bestIndex = toIndex;
+                }
+            }
+            if (bestIndex == fromIndex) {
+                countWithoutUpdate++;
+            } else {
+                countWithoutUpdate = 0;
+                // Note: atypical way of modifying a trip. Careful with introducing bugs here!
+                trip.ids.add(bestIndex, id);
+                if (bestIndex > fromIndex) trip.ids.remove(fromIndex);
+                else trip.ids.remove(fromIndex + 1);
+            }
+
+            fromIndex = (bestIndex + 1) % n;
+        }
+    }
+
+    void periodicals() {
+        oncePerSecondUpdates();
+        periodicallyShakeIfNeeded();
+        periodicallySave();
+    }
+
+    void oncePerSecondUpdates() {
+        long timeNow = System.currentTimeMillis();
+        if (timeNow > lastScorePrintTime + 1000) {
+            double scoreNow = sol.calcScore();
+            updateFreezeCheck(scoreNow);
+            printStatus(scoreNow);
+        }
+    }
+
+    void updateFreezeCheck(double scoreNow) {
+        minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
+        maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
+    }
+
+    void printStatus(double curr) {
+        long now = System.currentTimeMillis();
+        assertSolutionValid();
+        double prev = lastPrintedScore;
+        double diff = prev - curr;
+        String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
+        lastPrintedScore = curr;
+        if (curr < lowestKnownScore) {
+            timeWhenBestScoreReached = now;
+            lowestKnownScore = curr;
+        }
+        String c = formatAnsValue(curr);
+        String d = formatAnsValue(diff);
+        String b = formatAnsValue(lowestKnownScore);
+        int moves = sol.countMoves;
+        sol.countMoves = 0;
+
+        String timeFromStart = formatElapsedTime(now - startTime);
+        String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
+
+        int sumSA = sol.SAcount[0] + sol.SAcount[1];
+        String extras = "";
+        if (SA_IN_USE) {
+            extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
+                    + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
+                    + " (Temperature " + Math.round(temperature) + ")"
+            ;
+            sol.SAcount = new int[2];
+        }
+        System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
+        lastScorePrintTime = now;
     }
 
     void periodicallyShakeIfNeeded() {
@@ -255,30 +363,6 @@ public class SantaSolver {
         //probabilisticDetachment();
     }
 
-    void digAHoleInOldValley() throws FileNotFoundException {
-        SA_IN_USE = true;
-        temperature = temperatureAtOldValley;
-        Double val = loadSolution(getFilePath("run224\\santamap33"));
-        if (val == null) return;
-
-        //temp8();
-        REORDER_EXPERIMENT = true;
-        periodicals();
-        reorderingExperiment();
-        localSearchOrderOfIndividualTrips(sol);
-        optimalStealsAsLongAsPossible();
-        reorderingExperiment();
-
-        while (true) {
-            periodicals();
-            //shuffleAndSortIndividualTrips();
-            tryToExecuteRandomSwap();
-            tryToExecuteRandomSteal();
-        }
-
-
-    }
-
     void reorderingExperiment() {
         System.out.println("Trying to shuffle individual trip orders with reordering experiment...");
         for (Trip trip : sol.trips) {
@@ -308,7 +392,7 @@ public class SantaSolver {
 
             // Create order
             int prevId = 1;
-            double meters = - rng.nextInt(50000); // Slightly randomize and favor new solutions
+            double meters = - rng.nextInt(15000); // Slightly randomize and favor new solutions
             List<Integer> order = new ArrayList<>();
             for (int j=0; j<trip.size(); j++) {
                 // Create likelihoods for picking any of top candidates
@@ -353,331 +437,6 @@ public class SantaSolver {
             }
         }
         trip.ids = bestOrder;
-    }
-
-    double heldKarp(Trip trip) {
-        // https://stackoverflow.com/a/40311520/4490400
-        HashMap<Integer, Integer> idMapping = new HashMap<>();
-        int nextFreeId = 0;
-        for (int realId : trip.ids) {
-            int shortId = nextFreeId++;
-            idMapping.put(shortId, realId);
-        }
-        int n = trip.size();
-        double[][] distance = new double[n][n];
-        for (int i = 0; i < n; i++) {
-            int realIdI = idMapping.get(i);
-            for (int j = i + 1; j < n; j++) {
-                int realIdJ = idMapping.get(j);
-                double d = dist[realIdI][realIdJ];
-                distance[i][j] = d;
-                distance[j][i] = d;
-            }
-        }
-        double[][] dp = new double[n][1 << n];
-        for (int i = 0; i < dp.length; i++) Arrays.fill(dp[i], Double.POSITIVE_INFINITY);
-        dp[0][1] = 0.0;
-        for (int mask = 1; mask < (1 << n); mask++) {
-            for (int last = 0; last < n; last++) {
-                if ((mask & (1 << last)) == 0) continue;
-                for (int next = 0; next < n; next++) {
-                    if ((mask & (1 << next)) != 0) continue;
-                    dp[next][mask | (1 << next)] = Math.min(
-                            dp[next][mask | (1 << next)],
-                            dp[last][mask] + distance[last][next]);
-                }
-            }
-        }
-        double res = Double.POSITIVE_INFINITY;
-        for (int lastNode = 0; lastNode < n; lastNode++) {
-            res = Math.min(res, dist[lastNode][0] + dp[lastNode][(1 << n) - 1]);
-        }
-        System.out.println(res);
-        temp9 = res;
-        return res;
-    }
-
-    void temp8() {
-        double meters = 0;
-        List<Trip> smallTrips = new ArrayList<>();
-        for (Trip trip : sol.trips) {
-            if (trip.isEmpty()) continue;
-            if (trip.size() <= 11) {
-                System.out.println("size " + trip.size());
-                smallTrips.add(trip);
-                meters += trip.meters;
-            }
-        }
-        System.out.println("Alle 11 count " + smallTrips.size());
-        System.out.println("Non optimized meters: " + meters);
-        double optimized = tempBruteTSP(smallTrips);
-        System.out.println("Optimized meters: " + optimized);
-        System.out.println("Improvement: " + meters/optimized);
-    }
-    double tempBruteTSP(List<Trip> trips) {
-        double meters = 0;
-        for (Trip trip : trips) {
-            temp9 = Double.POSITIVE_INFINITY;;
-            //tempBruteTSP(trip);
-            heldKarp(trip);
-            meters += temp9;
-        }
-        return meters;
-    }
-
-    double temp9;
-    void tempBruteTSP(Trip trip) {
-        int[] order = new int[trip.size()];
-        rec(order, trip, 0);
-    }
-    void rec(int[] order, Trip original, int i) {
-        if (i >= original.size()) {
-            double meters = 0;
-            int prevId = 1;
-            for (int j=0; j<order.length; j++) {
-                int id = order[j];
-                meters += dist[prevId][id];
-                prevId = id;
-            }
-            meters += dist[prevId][1];
-            temp9 = Math.min(temp9, meters);
-            return;
-        }
-        int id = original.getIdFromIndex(i);
-        for (int j=0; j<order.length; j++) {
-            if (order[j] != 0) continue;
-            order[j] = id;
-            rec(order, original, i+1);
-            order[j] = 0;
-        }
-    }
-
-    void tryToExecuteRandomSwap() {
-        Trip trip1 = sol.trips.get(rng.nextInt(sol.trips.size()));
-        Trip trip2 = sol.trips.get(rng.nextInt(sol.trips.size()));
-        if (trip1.isEmpty() || trip2.isEmpty()) return;
-        int stop1index = rng.nextInt(trip1.size());
-        int stop2index = rng.nextInt(trip2.size());
-        int stop1id = trip1.getIdFromIndex(stop1index);
-        int stop2id = trip2.getIdFromIndex(stop2index);
-        if (stop1id == stop2id) return;
-        double swapVal = getSwapValue(trip1, trip2, stop1index, stop2index);
-        if (acceptProposal(swapVal)) {
-            if (trip1 != trip2) {
-                trip1.addStop(stop1index, stop2id);
-                trip2.addStop(stop2index, stop1id);
-                trip1.removeId(stop1id);
-                trip2.removeId(stop2id);
-            } else {
-                Trip trip = trip1;
-                trip.removeIndex(stop1index);
-                trip.addStop(stop1index, stop2id);
-                trip.removeIndex(stop2index);
-                trip.addStop(stop2index, stop1id);
-            }
-        }
-    }
-
-    double getSwapValue(Trip trip1, Trip trip2, int stop1index, int stop2index) {
-        int stop1id = trip1.getIdFromIndex(stop1index);
-        int stop2id = trip2.getIdFromIndex(stop2index);
-        if (stop1id == stop2id) return 0;
-        if (trip1 != trip2) {
-            if (trip1.weightSum + w[stop2id] - w[stop1id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
-            if (trip2.weightSum + w[stop1id] - w[stop2id] > MAX_TRIP_WEIGHT) return Double.NEGATIVE_INFINITY;
-            double replacementVal1 = trip2.getReplacementVal(stop1id, stop2index);
-            double replacementVal2 = trip1.getReplacementVal(stop2id, stop1index);
-            return replacementVal1 + replacementVal2;
-        } else {
-            return trip1.getSwapVal(stop1index, stop2index);
-        }
-    }
-
-    void tryToExecuteRandomSteal() {
-        Trip giver = sol.trips.get(rng.nextInt(sol.trips.size()));
-        Trip taker = sol.trips.get(rng.nextInt(sol.trips.size()));
-        if (giver.isEmpty()) return;
-        if (giver == taker) return;
-        int giverIndex = rng.nextInt(giver.size());
-        int takerIndex = rng.nextInt(taker.size() + 1);
-        int stealId = giver.getIdFromIndex(giverIndex);
-        if (taker.weightSum + w[stealId] > MAX_TRIP_WEIGHT) return;
-        double removalVal = giver.getRemovalVal(giverIndex);
-        double insertionVal = taker.getInsertionVal(stealId, takerIndex);
-        double proposalVal = removalVal + insertionVal;
-        if (acceptProposal(proposalVal)) {
-            taker.addStop(takerIndex, stealId);
-            giver.removeIndex(giverIndex);
-        }
-    }
-
-    boolean acceptProposal(double proposalVal) {
-        if (proposalVal < -999999999999.9) return false; // just a speedup
-        if (SA_IN_USE) {
-            if (proposalVal >= 0) return true;
-            double P = Math.exp(proposalVal / temperature);
-            lastPval = P;
-            lastPvalProposalVal = proposalVal;
-            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
-            boolean accepted = (P >= rng.nextDouble());
-            if (accepted) sol.SAcount[1]++;
-            else sol.SAcount[0]++;
-            return accepted;
-        } else {
-            // Default: hill climb.
-            return (proposalVal >= 0);
-        }
-    }
-
-
-    void createBadRouteRandomly() {
-        System.out.println("Generating a random solution...");
-        sol = new Solution();
-        List<Integer> candidates = new ArrayList<>();
-        for (int candidate = 2; candidate < endId; candidate++) {
-            candidates.add(candidate);
-        }
-        Collections.shuffle(candidates);
-        for (int stop : candidates) {
-            sol.shuffleTrips();
-            for (int tripIndex = 0; ; tripIndex++) {
-                if (tripIndex >= sol.trips.size()) sol.addEmptyTrip();
-                Trip trip = sol.trips.get(tripIndex);
-                if (trip.weightSum + w[stop] <= MAX_TRIP_WEIGHT) {
-                    trip.addStop(stop);
-                    break;
-                }
-            }
-        }
-    }
-
-    void nnTSP(Trip trip) {
-        List<Integer> newOrder = new ArrayList<>();
-        boolean[] newUsed = new boolean[endId];
-        int prevId = 1;
-        while (newOrder.size() < trip.size()) {
-            int closestId = -1;
-            Double minDist = Double.POSITIVE_INFINITY;
-            for (int id : trip.ids) {
-                if (newUsed[id])
-                    continue;
-                if (dist[prevId][id] < minDist) {
-                    minDist = dist[prevId][id];
-                    closestId = id;
-                }
-            }
-            newUsed[closestId] = true;
-            newOrder.add(closestId);
-            prevId = closestId;
-        }
-        trip.used = newUsed;
-        trip.ids = newOrder;
-        // meters will be updated later. weightSum doesn't change.
-    }
-
-    // Detach all nodes whose "detour" value exceeds some threshold. Insert them back to good trips in random order.
-    void probabilisticDetachment() {
-        // TODO: revert when unsuccessful
-        double valBeforeDetachment = sol.calcScore();
-        List<DetachmentCandidate> d = new ArrayList<>();
-        for (Trip trip : sol.trips) {
-            for (int i = 0; i < trip.size(); i++) {
-                int currId = trip.getIdFromIndex(i);
-                if (w[currId] > 50000)
-                    continue; // Only detach small items
-                int prevId = trip.getIdFromIndex(i - 1);
-                int nextId = trip.getIdFromIndex(i + 1);
-                double val = dist[prevId][currId] + dist[currId][nextId] - dist[prevId][nextId];
-                val *= (1 + 2 * rng.nextDouble()); // probabilistically so some random nodes get detached at the same time, too
-                d.add(new DetachmentCandidate(trip, i, val));
-            }
-        }
-        Collections.sort(d, Collections.reverseOrder());
-        List<Integer> detachedIds = new ArrayList<>();
-        HashMap<Trip, List<Integer>> removeIndices = new HashMap<>();
-        for (int i = 0; i < d.size() && d.get(i).val > 20000; i++) {
-            DetachmentCandidate detach = d.get(i);
-            int id = detach.trip.getIdFromIndex(detach.index);
-            List<Integer> removeList = removeIndices.get(detach.trip);
-            if (removeList == null) {
-                removeList = new ArrayList<>();
-                removeIndices.put(detach.trip, removeList);
-            }
-            removeList.add(detach.index);
-            detachedIds.add(id);
-        }
-        for (Map.Entry<Trip, List<Integer>> entry : removeIndices.entrySet()) {
-            Trip trip = entry.getKey();
-            List<Integer> list = entry.getValue();
-            Collections.sort(list, Collections.reverseOrder());
-            for (int i : list) {
-                trip.removeIndex(i); // No need to update meters yet
-            }
-        }
-
-        Collections.shuffle(detachedIds);
-        for (int currId : detachedIds) {
-
-            //System.out.println("Placing id " + currId);
-
-            // These will be filled
-            Trip bestCandidate = null;
-            double bestCandidateInsertionVal = Double.NEGATIVE_INFINITY;
-            int bestCandidateInsertionPos = 0;
-
-            for (Trip taker : sol.trips) {
-                if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
-                    continue;
-                int takerBestPos = -1;
-                double takerBestPosInsertionVal = Integer.MIN_VALUE;
-                for (int newPos = 0; newPos <= taker.size(); newPos++) {
-                    int prevId = taker.getIdFromIndex(newPos - 1);
-                    int shiftedNextId = taker.getIdFromIndex(newPos);
-                    double insertionVal = dist[prevId][shiftedNextId] - (dist[prevId][currId] + dist[currId][shiftedNextId]);
-                    if (insertionVal > takerBestPosInsertionVal) {
-                        takerBestPosInsertionVal = insertionVal;
-                        takerBestPos = newPos;
-                    }
-                }
-                if (bestCandidate == null || takerBestPosInsertionVal > bestCandidateInsertionVal) {
-                    bestCandidate = taker;
-                    bestCandidateInsertionVal = takerBestPosInsertionVal;
-                    bestCandidateInsertionPos = takerBestPos;
-                }
-            }
-
-            if (bestCandidate == null) {
-                System.out.println("Unable to find placement for id=" + currId + ", creating new trip for it.");
-                bestCandidate = sol.addEmptyTrip();
-                bestCandidateInsertionPos = 0;
-            }
-            bestCandidate.addStop(bestCandidateInsertionPos, currId); // No need to update meters yet
-        }
-        double valAfterDetachment = sol.calcScore();
-        double diff = valBeforeDetachment - valAfterDetachment;
-        System.out.println(formatAnsValue(valAfterDetachment) + " Detached " + detachedIds.size() + " destinations (" + Math.round(100.0 * detachedIds.size() / (endId - 2)) + "%) (diff " + diff + ")");
-    }
-
-    class DetachmentCandidate implements Comparable<DetachmentCandidate> {
-
-        Trip trip;
-        int index;
-        double val;
-
-        public DetachmentCandidate(Trip trip, int index, double val) {
-            this.trip = trip;
-            this.index = index;
-            this.val = val;
-        }
-
-        @Override
-        public int compareTo(DetachmentCandidate o) {
-            if (this.val - o.val < 0)
-                return -1;
-            if (this.val - o.val > 0)
-                return 1;
-            return 0;
-        }
     }
 
     void optimalStealsAsLongAsPossible() {
@@ -727,21 +486,20 @@ public class SantaSolver {
         } else {
             giver.meters += removalVal;
             taker.meters += bestPosInsertionVal;
-            taker.addStop(bestPos, currId);
+            taker.addId(bestPos, currId);
             giver.removeIndex(index);
             return true;
         }
     }
 
+    /********************************** Route creation  ***************************************/
 
-    void createRoutesFromScratch() {
-        while (true) {
-            createRouteFromScratch();
-        }
-    }
-
+    /** Heuristic ("smart") way of creating a route from scratch.
+     *  Each trip consists of a cluster of nodes as far as possible, and some nodes collected along the way. */
     void createRouteFromScratch() {
         System.out.print("Creating route from scratch... " + (verbose ? "\n" : ""));
+
+        // TODO pakota esikäsittelyl et reittiä luodessa tosi lähekkäin olevat nodet päätyy samaan trippiin
 
         // Init
         sol = new Solution();
@@ -749,7 +507,6 @@ public class SantaSolver {
         candidates = new ArrayList<>();
 
         // Order candidates mainly based on distance from Santa
-        double[] loneliness = getLoneliness();
         List<IDval> sortHelper = new ArrayList<>();
         for (int id = 2; id < endId; id++) {
             double heuristicVal = dist[1][id] + rng.nextInt(20000);
@@ -787,14 +544,14 @@ public class SantaSolver {
         return min + 5;
     }
 
-    // This method intentionally overfills (due to use case where this is used to set a lower bound)
+    /** Note: this method intentionally overfills (due to use case where this is used to set a lower bound). */
     boolean possibleToQuicklyFillClusterOfSize(double maxSparsity) {
 
         Trip trip = new Trip(0);
 
         // Lock down the furthest target
         int currId = candidates.get(candidates.size() - 1);
-        trip.addStop(currId);
+        trip.addId(currId);
 
         double goal = UTZ_CLUSTER_GOAL * MAX_TRIP_WEIGHT;
         while (true) {
@@ -810,7 +567,7 @@ public class SantaSolver {
                 if (sparsity > maxSparsity) continue;
 
                 // Add candidate to cluster
-                trip.addStop(candidateId);
+                trip.addId(candidateId);
                 if (trip.weightSum >= goal) return true;
                 change = true;
             }
@@ -850,7 +607,7 @@ public class SantaSolver {
 
                 // Lock down the furthest target
                 currTrip.used[clusterTarget] = true;
-                currTrip.addStop(clusterTarget);
+                currTrip.addId(clusterTarget);
                 indicesForCurrTrip.add(candidates.size() - 1);
 
                 // collect cluster (at least) up to UTZ_CLUSTER_GOAL and then zigzag to/from cluster to fill remaining capacity.
@@ -948,10 +705,6 @@ public class SantaSolver {
                     heuristicVal *= (1 + randomSize * rng.nextDouble());
                 }
 
-                // TODO more advanced heuristic which gives some consideration to WEIGHT
-                // as well as possibly other factors, such as problem-childness-from-previous rounds or number
-                // of close neighbors still available as candidates
-
                 if (sparsity <= maxSparsity && heuristicVal < bestHeuristicVal) {
                     bestHeuristicVal = heuristicVal;
                     bestIndex = candidateIndex;
@@ -963,7 +716,7 @@ public class SantaSolver {
             // Add closest node to cluster
             indicesForCurrTrip.add(bestIndex);
             int candidateId = candidates.get(bestIndex);
-            currTrip.addStop(candidateId);
+            currTrip.addId(candidateId);
         }
     }
 
@@ -985,12 +738,12 @@ public class SantaSolver {
                 if (detourCost1 < detourCost2) {
                     // Case: add to beginning ("on the way to cluster")
                     closest1 = candidateId;
-                    currTrip.addStop(0, candidateId);
+                    currTrip.addId(0, candidateId);
                     indicesForCurrTrip.add(candidateIndex);
                 } else {
                     // Case: add to end ("on the way from cluster")
                     closest2 = candidateId;
-                    currTrip.addStop(candidateId);
+                    currTrip.addId(candidateId);
                     indicesForCurrTrip.add(candidateIndex);
                 }
             }
@@ -998,357 +751,25 @@ public class SantaSolver {
         }
     }
 
-    void localSearchOrderOfIndividualTrips(Solution trips) {
-        for (Trip trip : trips.trips) {
-            localSearchOrderOfIndividualTrip(trip);
+    void createBadRouteRandomly() {
+        System.out.println("Generating a random solution...");
+        sol = new Solution();
+        List<Integer> candidates = new ArrayList<>();
+        for (int candidate = 2; candidate < endId; candidate++) {
+            candidates.add(candidate);
         }
-    }
-
-    // This method will local walk the order within a single trip to a local optima.
-    void localSearchOrderOfIndividualTrip(Trip trip) {
-        if (trip.isEmpty()) return;
-        int n = trip.size();
-        int fromIndex = 0;
-        for (int countWithoutUpdate = 0; countWithoutUpdate <= n; ) {
-            int id = trip.getIdFromIndex(fromIndex);
-            double removalVal = trip.getRemovalVal(fromIndex);
-            int bestIndex = fromIndex;
-            double bestPosVal = 0;
-            for (int toIndex = 0; toIndex <= n; toIndex++) {
-                if (toIndex == fromIndex)
-                    continue; // displaces itself and causes bugs
-                if (toIndex == fromIndex + 1)
-                    continue; // this would also displace itself and cause bugs
-
-                double insertionVal = trip.getInsertionVal(id, toIndex);
-                double val = insertionVal + removalVal;
-                if (val > bestPosVal) {
-                    bestPosVal = val;
-                    bestIndex = toIndex;
-                }
-            }
-            if (bestIndex == fromIndex) {
-                countWithoutUpdate++;
-            } else {
-                countWithoutUpdate = 0;
-                // Note: atypical way of modifying a trip. Careful with introducing bugs here!
-                trip.ids.add(bestIndex, id);
-                if (bestIndex > fromIndex) trip.ids.remove(fromIndex);
-                else trip.ids.remove(fromIndex + 1);
-            }
-
-            fromIndex = (bestIndex + 1) % n;
-        }
-    }
-
-    class Solution {
-        List<Trip> trips;
-        int nextFreeId;
-        int[] SAcount;
-        int countMoves;
-
-        public Solution() {
-            reset();
-        }
-
-        void reset() {
-            SAcount = new int[2];
-            countMoves = 0;
-            trips = new ArrayList<>();
-            nextFreeId = 0;
-            // These provide some flexibility when moving between solutions
-            addEmptyTrip();
-            addEmptyTrip();
-        }
-
-        Trip addEmptyTrip() {
-            Trip trip = new Trip(nextFreeId++);
-            trips.add(trip);
-            return trip;
-        }
-
-        void addExistingTripAndFixItsId(Trip trip) {
-            trip.tripId = nextFreeId++;
-            trips.add(trip);
-        }
-
-        void shuffleTrips() {
-            Collections.shuffle(trips);
-        }
-
-        Solution getCopy() {
-            Solution solutionCopy = new Solution();
-            solutionCopy.countMoves = this.countMoves;
-            solutionCopy.nextFreeId = this.nextFreeId;
-            solutionCopy.SAcount = new int[2];
-            solutionCopy.SAcount[0] = this.SAcount[0];
-            solutionCopy.SAcount[1] = this.SAcount[1];
-            solutionCopy.trips = new ArrayList<>();
-            for (Trip trip : this.trips) {
-                Trip copy = new Trip(trip.tripId);
-                copy.ids = new ArrayList<>();
-                for (int id : trip.ids) {
-                    copy.ids.add(id);
-                }
-                copy.meters = trip.meters;
-                copy.used = new boolean[trip.used.length];
-                for (int i=0; i<trip.used.length; i++) {
-                    copy.used[i] = trip.used[i];
-                }
-                copy.weightSum = trip.weightSum;
-                solutionCopy.trips.add(copy);
-            }
-            return solutionCopy;
-        }
-
-        double calcScore() {
-            double meters = 0;
-            for (Trip trip : trips) {
-                meters += trip.updateMeters();
-            }
-            return meters;
-        }
-
-        int calcLiveness() {
-            boolean helper = SA_IN_USE;
-            SA_IN_USE = false;
-            int accMoveCount = 0;
-            double positiveValSums = 0;
-            for (int trip1Index=0; trip1Index<trips.size(); trip1Index++) {
-                Trip trip1 = trips.get(trip1Index);
-                for (int stop1Index=0; stop1Index<trip1.size(); stop1Index++) {
-                    for (int trip2Index=trip1Index+1; trip2Index<trips.size(); trip2Index++) { // Only check each pair of trips once
-                        Trip trip2 = trips.get(trip2Index);
-                        for (int stop2Index=0; stop2Index<trip2.size(); stop2Index++) {
-                            double swapVal = getSwapValue(trip1, trip2, stop1Index, stop2Index);
-                            if (swapVal >= 0) {
-                                accMoveCount++;
-                                positiveValSums += swapVal;
-                            }
-                        }
-                    }
-                }
-            }
-            SA_IN_USE = helper;
-            System.out.println("        Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
-            return accMoveCount;
-        }
-
-        boolean isValid() {
-            HashSet<Integer> validityCheck = new HashSet<>();
-            for (Trip trip : trips) {
-                for (int id : trip.ids) {
-                    if (!validityCheck.add(id)) {
-                        System.out.println("Invalid solution! Id " + id + " appears twice!");
-                        return false;
-                    }
-                }
-                if (trip.weightSum > MAX_TRIP_WEIGHT) {
-                    System.out.println("Invalid solution! Sleigh can not carry " + trip.weightSum);
-                    return false;
-                }
-            }
-            if (validityCheck.size() != endId - 2) {
-                System.out.println("Invalid solution! Expected " + (endId - 2) + " stops, but actual was " + validityCheck.size());
-                return false;
-            }
-            return true;
-        }
-    }
-
-    class Trip {
-
-        int tripId;
-        List<Integer> ids;
-        double meters;
-        boolean[] used;
-        long weightSum;
-
-        public Trip(int tripId) {
-            this.tripId = tripId;
-            ids = new ArrayList<>();
-            meters = 0;
-            used = new boolean[endId];
-            weightSum = 0;
-        }
-
-        int getIdFromIndex(int index) {
-            if (index == -1 || index == ids.size())
-                return 1;
-            return ids.get(index);
-        }
-
-        // Note: meters need to be updated separately.
-        void addStop(int id) {
-            addStop(ids.size(), id);
-        }
-
-        void addStop(int i, int id) {
-            used[id] = true;
-            weightSum += w[id];
-            ids.add(i, id);
-            sol.countMoves++;
-        }
-
-        void removeIndex(int i) {
-            int id = ids.remove(i);
-            used[id] = false;
-            weightSum -= w[id];
-        }
-
-        void removeId(int id) {
-            for (int i = 0; i < ids.size(); i++) {
-                if (ids.get(i) == id) {
-                    removeIndex(i);
-                    return;
+        Collections.shuffle(candidates);
+        for (int node : candidates) {
+            sol.shuffleTrips();
+            for (int tripIndex = 0; ; tripIndex++) {
+                if (tripIndex >= sol.trips.size()) sol.addEmptyTrip();
+                Trip trip = sol.trips.get(tripIndex);
+                if (trip.weightSum + w[node] <= MAX_TRIP_WEIGHT) {
+                    trip.addId(node);
+                    break;
                 }
             }
         }
-
-        int firstId() {
-            return ids.get(0);
-        }
-
-        int lastId() {
-            return ids.get(ids.size() - 1);
-        }
-
-        double updateMeters() {
-            meters = 0;
-            if (ids.isEmpty())
-                return 0;
-            int prevId = 1;
-            for (int id : ids) {
-                meters += dist[prevId][id];
-                prevId = id;
-            }
-            meters += dist[prevId][1];
-            return meters;
-        }
-
-        boolean isEmpty() {
-            return ids.isEmpty();
-        }
-
-        int size() {
-            return ids.size();
-        }
-
-        double getRemovalVal(int index) {
-            int prevId = getIdFromIndex(index - 1);
-            int removeId = getIdFromIndex(index);
-            int nextId = getIdFromIndex(index + 1);
-            return (dist[prevId][removeId] + dist[removeId][nextId]) - dist[prevId][nextId];
-        }
-
-        double getReplacementVal(int newId, int index) {
-            int prevId = getIdFromIndex(index - 1);
-            int oldId = getIdFromIndex(index);
-            int nextId = getIdFromIndex(index + 1);
-            return dist[prevId][oldId] + dist[oldId][nextId] - (dist[prevId][newId] + dist[newId][nextId]);
-        }
-
-        double getInsertionVal(int newId, int index) {
-            int prevId = getIdFromIndex(index - 1);
-            int shiftedNextId = getIdFromIndex(index);
-            return dist[prevId][shiftedNextId] - (dist[prevId][newId] + dist[newId][shiftedNextId]);
-        }
-
-        double getSwapVal(int index1, int index2) {
-            if (index1 > index2) {
-                int helper = index1;
-                index1 = index2;
-                index2 = helper;
-            }
-            int id1 = getIdFromIndex(index1);
-            int id2 = getIdFromIndex(index2);
-            if (index1 + 1 == index2) {
-                int prev = getIdFromIndex(index1 - 1);
-                int next = getIdFromIndex(index2 + 1);
-                return dist[prev][id1] + dist[id2][next] - (dist[prev][id2] + dist[id1][next]);
-            } else {
-                double rep1 = getReplacementVal(id2, index1);
-                double rep2 = getReplacementVal(id1, index2);
-                return rep1 + rep2;
-            }
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            return this == o;
-        }
-
-        @Override
-        public int hashCode() {
-            return this.tripId;
-        }
-
-        @Override
-        public String toString() {
-            StringBuilder sb = new StringBuilder();
-            for (int id : ids) {
-                sb.append(id);
-                sb.append("; ");
-            }
-            sb.deleteCharAt(sb.length() - 1);
-            sb.deleteCharAt(sb.length() - 1);
-            return sb.toString();
-        }
-    }
-
-
-
-    void periodicals() {
-        oncePerSecondUpdates();
-        periodicallyShakeIfNeeded();
-        periodicallySave();
-    }
-
-    void oncePerSecondUpdates() {
-        long timeNow = System.currentTimeMillis();
-        if (timeNow > lastScorePrintTime + 1000) {
-            double scoreNow = sol.calcScore();
-            updateFreezeCheck(scoreNow);
-            printStatus(scoreNow);
-        }
-    }
-
-    void updateFreezeCheck(double scoreNow) {
-        minScoreSinceLastFreezeCheck = Math.min(scoreNow, minScoreSinceLastFreezeCheck);
-        maxScoreSinceLastFreezeCheck = Math.max(scoreNow, maxScoreSinceLastFreezeCheck);
-    }
-
-    void printStatus(double curr) {
-        long now = System.currentTimeMillis();
-        assertSolutionValid();
-        double prev = lastPrintedScore;
-        double diff = prev - curr;
-        String s = (diff > 0 ? "+" : ""); // indicate change by + or -, no symbol means no change
-        lastPrintedScore = curr;
-        if (curr < lowestKnownScore) {
-            timeWhenBestScoreReached = now;
-            lowestKnownScore = curr;
-        }
-        String c = formatAnsValue(curr);
-        String d = formatAnsValue(diff);
-        String b = formatAnsValue(lowestKnownScore);
-        int moves = sol.countMoves;
-        sol.countMoves = 0;
-
-        String timeFromStart = formatElapsedTime(now - startTime);
-        String timeFromBest = formatElapsedTime(now - timeWhenBestScoreReached);
-
-        int sumSA = sol.SAcount[0] + sol.SAcount[1];
-        String extras = "";
-        if (SA_IN_USE) {
-            extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
-                    + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
-                    + " (Temperature " + Math.round(temperature) + ")"
-            ;
-            sol.SAcount = new int[2];
-        }
-        System.out.println(c + " (" + s + d + " diff) (" + b + " best " + timeFromBest + " ago) (" + timeFromStart + " from start) (" + moves + " moves) | " + extras);
-        lastScorePrintTime = now;
     }
 
     /********************************** FILE OPERATIONS ***************************************/
@@ -1453,7 +874,7 @@ public class SantaSolver {
                 for (int i = 0; i < line.length; i++) {
                     String element = line[i].replace(" ", "");
                     int id = Integer.parseInt(element);
-                    trip.addStop(id);
+                    trip.addId(id);
                 }
                 sol.addExistingTripAndFixItsId(trip);
             } catch (Exception ex) {
@@ -1585,48 +1006,8 @@ public class SantaSolver {
         return loneliness;
     }
 
-    double utz(Trip trip) {
+    public static double utz(Trip trip) {
         return 1.0 * trip.weightSum / MAX_TRIP_WEIGHT;
-    }
-
-    void printTrips(List<Trip> trips) {
-        List<Helper> ordered = new ArrayList<>();
-        for (Trip trip : trips) {
-            ordered.add(new Helper(trip, utz(trip)));
-        }
-        Collections.sort(ordered);
-        for (Helper h : ordered) {
-            Trip trip = h.trip;
-            double furthestDist = 0;
-            for (int id : trip.ids) furthestDist = Math.max(furthestDist, dist[1][id]);
-            System.out.println(
-                    "Trip #" + trip.tripId +
-                            " overall " + Math.round(trip.meters / 1000) + "km, " +
-                            "target " + Math.round(furthestDist / 1000) + "km, " +
-                            "detours " + Math.round((trip.meters - 2 * furthestDist) / 1000) + "km, " +
-                            trip.size() + " stops, " +
-                            "utz " + utz(trip)
-            );
-        }
-    }
-
-    class Helper implements Comparable {
-
-        Trip trip;
-        double v;
-
-        public Helper(Trip trip, double v) {
-            this.trip = trip;
-            this.v = v;
-        }
-
-        @Override
-        public int compareTo(Object o) {
-            Helper other = (Helper) o;
-            if (this.v < other.v) return 1;
-            if (other.v < this.v) return -1;
-            return 0;
-        }
     }
 
     String formatAnsValue(double val) {
@@ -1676,32 +1057,6 @@ public class SantaSolver {
         }
     }
 
-    void canWeRedistribute() {
-        PriorityQueue<Helper> q = new PriorityQueue<>(Collections.reverseOrder());
-        for (Trip trip : sol.trips) {
-            if (trip.isEmpty()) continue;
-            q.add(new Helper(trip, trip.weightSum));
-        }
-        Trip giver = q.poll().trip;
-        System.out.println("Givers weight " + giver.weightSum);
-        PriorityQueue<IDval> ids = new PriorityQueue<>();
-        for (int id : giver.ids) {
-            ids.add(new IDval(id, -w[id]));
-        }
-        while (!ids.isEmpty()) {
-            int id = ids.poll().id;
-            Helper taker = q.poll();
-            if (taker.v + w[id] > MAX_TRIP_WEIGHT) {
-                System.out.println("Can't put id="+id+" (weight " + w[id] + " into taker " + taker.trip.tripId + " (weightSum " + taker.v + "), because weight sum would be " + (taker.v + w[id]));
-                return;
-            }
-            System.out.println("Can put thing with weight " + w[id] + " into taker with weight " + taker.v);
-            taker.v += w[id];
-            q.add(taker);
-        }
-        System.out.println("SUCCESS!");
-    }
-
     double averageFill(List<Trip> trips) {
         long sumOfWeights = 0;
         int countOfNonEmptyTrips = 0;
@@ -1713,6 +1068,334 @@ public class SantaSolver {
         double avgWeight = sumOfWeights * 1.0 / countOfNonEmptyTrips;
         double avgFill = avgWeight / MAX_TRIP_WEIGHT;
         return avgFill;
+    }
+
+    /********************************** Blah ***************************************/
+
+    void livenessExperiment() {
+        //createBadRouteRandomly();
+        createRouteFromScratch();
+        SA_IN_USE = true;
+        temperature = temperatureAtJumpStart;
+        long X = 30000;
+        while (true) {
+            double meters = sol.calcScore();
+            double metersBeforeFork = meters;
+            printStatus(meters);
+            periodicallySave();
+
+            double temperatureBeforeFork = temperature;
+            Solution beforeFork = sol.getCopy();
+
+            // Run first fork here to set goalMeters based on how far a single fork gets in X milliseconds.
+            long firstForkEndTime = System.currentTimeMillis() + X;
+            while (System.currentTimeMillis() < firstForkEndTime) {
+                for (int i=0; i<50000; i++) {
+                    tryToExecuteRandomSteal();
+                    tryToExecuteRandomSwap();
+                }
+            }
+            meters = sol.calcScore();
+            int liveness = sol.calcLiveness();
+            int bestForkLiveness = liveness;
+            Solution bestForkSolution = sol;
+            System.out.println("        Fork 1: " + formatAnsValue(meters) + " meters " + liveness + " liveness, goaltime: " + formatElapsedTime(X));
+            double goalMeters = meters;
+
+            // Collect statistics on forks
+            int sumOfLivenesses = bestForkLiveness;
+            int countOfAcceptableForks = 1;
+
+            // Run other forks until each one reaches goalMeters
+            for (int fork=2; fork<=5; fork++) {
+                sol = beforeFork.getCopy();
+                temperature = temperatureBeforeFork;
+                meters = metersBeforeFork;
+
+                long forkStartTime = System.currentTimeMillis();
+                long expectedForkEndTime = forkStartTime + X;
+                int countLoop = 0;
+                while (meters > goalMeters) {
+                    for (int i=0; i<50000; i++) {
+                        tryToExecuteRandomSteal();
+                        tryToExecuteRandomSwap();
+                        countLoop++;
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now > 0.5 * expectedForkEndTime) {
+                        // Speedup by not calculating this all the time
+                        meters = sol.calcScore();
+                        if (now > expectedForkEndTime+2*X) {
+                            // Timeout if we can't reach comparable solution in 3 times fork 1 time
+                            break;
+                        }
+                    }
+                }
+                if (meters > goalMeters) {
+                    // Uncomparable (worse) solution reached despite using much more time.
+                    continue;
+                }
+                liveness = sol.calcLiveness();
+                sumOfLivenesses += liveness;
+                countOfAcceptableForks++;
+                System.out.println("        Fork " + fork + ": " + formatAnsValue(meters) + " meters " + liveness + " liveness, time spent: " + formatElapsedTime(System.currentTimeMillis() - forkStartTime) + " (looped " + countLoop + " times)");
+                if (liveness > bestForkLiveness) {
+                    bestForkLiveness = liveness;
+                    bestForkSolution = sol;
+                }
+            }
+
+            // Choose best fork to continue search
+            sol = bestForkSolution;
+            System.out.println("Chose fork with liveness " + bestForkLiveness + " (average " + (sumOfLivenesses*1.0/countOfAcceptableForks) + ")");
+
+            // Shake every now and then
+            if (rng.nextDouble() < 0.1) reorderingExperiment();
+
+            // Increase fork time as going gets tougher
+            X *= 1.02;
+        }
+    }
+
+    void hillClimbRandomRoute() {
+        createBadRouteRandomly();
+        while (true) {
+            periodicals();
+            tryToExecuteRandomSwap();
+            tryToExecuteRandomSteal();
+        }
+    }
+
+    double heldKarp(Trip trip) {
+        // https://stackoverflow.com/a/40311520/4490400
+        HashMap<Integer, Integer> idMapping = new HashMap<>();
+        int nextFreeId = 0;
+        for (int realId : trip.ids) {
+            int shortId = nextFreeId++;
+            idMapping.put(shortId, realId);
+        }
+        int n = trip.size();
+        double[][] distance = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            int realIdI = idMapping.get(i);
+            for (int j = i + 1; j < n; j++) {
+                int realIdJ = idMapping.get(j);
+                double d = dist[realIdI][realIdJ];
+                distance[i][j] = d;
+                distance[j][i] = d;
+            }
+        }
+        double[][] dp = new double[n][1 << n];
+        for (int i = 0; i < dp.length; i++) Arrays.fill(dp[i], Double.POSITIVE_INFINITY);
+        dp[0][1] = 0.0;
+        for (int mask = 1; mask < (1 << n); mask++) {
+            for (int last = 0; last < n; last++) {
+                if ((mask & (1 << last)) == 0) continue;
+                for (int next = 0; next < n; next++) {
+                    if ((mask & (1 << next)) != 0) continue;
+                    dp[next][mask | (1 << next)] = Math.min(
+                            dp[next][mask | (1 << next)],
+                            dp[last][mask] + distance[last][next]);
+                }
+            }
+        }
+        double res = Double.POSITIVE_INFINITY;
+        for (int lastNode = 0; lastNode < n; lastNode++) {
+            res = Math.min(res, dist[lastNode][0] + dp[lastNode][(1 << n) - 1]);
+        }
+        System.out.println(res);
+        temp9 = res;
+        return res;
+    }
+
+    void temp8() {
+        double meters = 0;
+        List<Trip> smallTrips = new ArrayList<>();
+        for (Trip trip : sol.trips) {
+            if (trip.isEmpty()) continue;
+            if (trip.size() <= 11) {
+                System.out.println("size " + trip.size());
+                smallTrips.add(trip);
+                meters += trip.meters;
+            }
+        }
+        System.out.println("Alle 11 count " + smallTrips.size());
+        System.out.println("Non optimized meters: " + meters);
+        double optimized = tempBruteTSP(smallTrips);
+        System.out.println("Optimized meters: " + optimized);
+        System.out.println("Improvement: " + meters/optimized);
+    }
+    double tempBruteTSP(List<Trip> trips) {
+        double meters = 0;
+        for (Trip trip : trips) {
+            temp9 = Double.POSITIVE_INFINITY;;
+            //tempBruteTSP(trip);
+            heldKarp(trip);
+            meters += temp9;
+        }
+        return meters;
+    }
+
+    double temp9;
+    void tempBruteTSP(Trip trip) {
+        int[] order = new int[trip.size()];
+        rec(order, trip, 0);
+    }
+    void rec(int[] order, Trip original, int i) {
+        if (i >= original.size()) {
+            double meters = 0;
+            int prevId = 1;
+            for (int j=0; j<order.length; j++) {
+                int id = order[j];
+                meters += dist[prevId][id];
+                prevId = id;
+            }
+            meters += dist[prevId][1];
+            temp9 = Math.min(temp9, meters);
+            return;
+        }
+        int id = original.getIdFromIndex(i);
+        for (int j=0; j<order.length; j++) {
+            if (order[j] != 0) continue;
+            order[j] = id;
+            rec(order, original, i+1);
+            order[j] = 0;
+        }
+    }
+
+    void nnTSP(Trip trip) {
+        List<Integer> newOrder = new ArrayList<>();
+        boolean[] newUsed = new boolean[endId];
+        int prevId = 1;
+        while (newOrder.size() < trip.size()) {
+            int closestId = -1;
+            Double minDist = Double.POSITIVE_INFINITY;
+            for (int id : trip.ids) {
+                if (newUsed[id])
+                    continue;
+                if (dist[prevId][id] < minDist) {
+                    minDist = dist[prevId][id];
+                    closestId = id;
+                }
+            }
+            newUsed[closestId] = true;
+            newOrder.add(closestId);
+            prevId = closestId;
+        }
+        trip.used = newUsed;
+        trip.ids = newOrder;
+        // meters will be updated later. weightSum doesn't change.
+    }
+
+    // Detach all nodes whose "detour" value exceeds some threshold. Insert them back to good trips in random order.
+    void probabilisticDetachment() {
+        // TODO: revert when unsuccessful
+        double valBeforeDetachment = sol.calcScore();
+        List<DetachmentCandidate> d = new ArrayList<>();
+        for (Trip trip : sol.trips) {
+            for (int i = 0; i < trip.size(); i++) {
+                int currId = trip.getIdFromIndex(i);
+                if (w[currId] > 50000)
+                    continue; // Only detach small items
+                int prevId = trip.getIdFromIndex(i - 1);
+                int nextId = trip.getIdFromIndex(i + 1);
+                double val = dist[prevId][currId] + dist[currId][nextId] - dist[prevId][nextId];
+                val *= (1 + 2 * rng.nextDouble()); // probabilistically so some random nodes get detached at the same time, too
+                d.add(new DetachmentCandidate(trip, i, val));
+            }
+        }
+        Collections.sort(d, Collections.reverseOrder());
+        List<Integer> detachedIds = new ArrayList<>();
+        HashMap<Trip, List<Integer>> removeIndices = new HashMap<>();
+        for (int i = 0; i < d.size() && d.get(i).val > 20000; i++) {
+            DetachmentCandidate detach = d.get(i);
+            int id = detach.trip.getIdFromIndex(detach.index);
+            List<Integer> removeList = removeIndices.get(detach.trip);
+            if (removeList == null) {
+                removeList = new ArrayList<>();
+                removeIndices.put(detach.trip, removeList);
+            }
+            removeList.add(detach.index);
+            detachedIds.add(id);
+        }
+        for (Map.Entry<Trip, List<Integer>> entry : removeIndices.entrySet()) {
+            Trip trip = entry.getKey();
+            List<Integer> list = entry.getValue();
+            Collections.sort(list, Collections.reverseOrder());
+            for (int i : list) {
+                trip.removeIndex(i); // No need to update meters yet
+            }
+        }
+
+        Collections.shuffle(detachedIds);
+        for (int currId : detachedIds) {
+
+            //System.out.println("Placing id " + currId);
+
+            // These will be filled
+            Trip bestCandidate = null;
+            double bestCandidateInsertionVal = Double.NEGATIVE_INFINITY;
+            int bestCandidateInsertionPos = 0;
+
+            for (Trip taker : sol.trips) {
+                if (taker.weightSum + w[currId] > MAX_TRIP_WEIGHT)
+                    continue;
+                int takerBestPos = -1;
+                double takerBestPosInsertionVal = Integer.MIN_VALUE;
+                for (int newPos = 0; newPos <= taker.size(); newPos++) {
+                    int prevId = taker.getIdFromIndex(newPos - 1);
+                    int shiftedNextId = taker.getIdFromIndex(newPos);
+                    double insertionVal = dist[prevId][shiftedNextId] - (dist[prevId][currId] + dist[currId][shiftedNextId]);
+                    if (insertionVal > takerBestPosInsertionVal) {
+                        takerBestPosInsertionVal = insertionVal;
+                        takerBestPos = newPos;
+                    }
+                }
+                if (bestCandidate == null || takerBestPosInsertionVal > bestCandidateInsertionVal) {
+                    bestCandidate = taker;
+                    bestCandidateInsertionVal = takerBestPosInsertionVal;
+                    bestCandidateInsertionPos = takerBestPos;
+                }
+            }
+
+            if (bestCandidate == null) {
+                System.out.println("Unable to find placement for id=" + currId + ", creating new trip for it.");
+                bestCandidate = sol.addEmptyTrip();
+                bestCandidateInsertionPos = 0;
+            }
+            bestCandidate.addId(bestCandidateInsertionPos, currId); // No need to update meters yet
+        }
+        double valAfterDetachment = sol.calcScore();
+        double diff = valBeforeDetachment - valAfterDetachment;
+        System.out.println(formatAnsValue(valAfterDetachment) + " Detached " + detachedIds.size() + " destinations (" + Math.round(100.0 * detachedIds.size() / (endId - 2)) + "%) (diff " + diff + ")");
+    }
+
+    class DetachmentCandidate implements Comparable<DetachmentCandidate> {
+
+        Trip trip;
+        int index;
+        double val;
+
+        public DetachmentCandidate(Trip trip, int index, double val) {
+            this.trip = trip;
+            this.index = index;
+            this.val = val;
+        }
+
+        @Override
+        public int compareTo(DetachmentCandidate o) {
+            if (this.val - o.val < 0)
+                return -1;
+            if (this.val - o.val > 0)
+                return 1;
+            return 0;
+        }
+    }
+
+    void createRoutesFromScratch() {
+        while (true) {
+            createRouteFromScratch();
+        }
     }
 
 }
