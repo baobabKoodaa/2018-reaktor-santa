@@ -9,19 +9,19 @@ import java.util.*;
 public class SantaSolver {
 
     // Constants from problem statement
-    public static final double SANTA_HOME_LATITUDE = 68.073611;
-    public static final double SANTA_HOME_LONGITUDE = 29.315278;
-    public static final int MAX_TRIP_WEIGHT = 10000000;
+    static final double SANTA_HOME_LATITUDE = 68.073611;
+    static final double SANTA_HOME_LONGITUDE = 29.315278;
+    static final int MAX_TRIP_WEIGHT = 10000000;
 
     // Input will be read into these variables
-    public static int endId;
-    public static double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
-    public static int[] w; // weights
-    public static long sumOfAllWeights;
-    public static double[][] dist;
+    static int endId;
+    static double[][] c; // coordinate values for destinations. [id][0/1] where 0==latitude, 1==longitude
+    static int[] w; // weights
+    static long sumOfAllWeights;
+    static double[][] dist;
 
     // Current solution state
-    public static Solution sol;
+    static Solution sol;
 
     // Route creation variables
     List<Integer> candidates;
@@ -32,19 +32,18 @@ public class SantaSolver {
     Set<Integer> challengingNodes;
 
     // Hyperparameters for route creation
-    double randomSize = 0.58; // Optimal around 0.58
-    double multiplierToSlightlyExpandMaxSparsity = 1.1; // Optimal between 1.0 - 1.1
-    double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
-    double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower
+    static final double RANDOM_SIZE = 0.58; // Optimal around 0.58
+    static final double SPARSITY_EXPANSION = 1.1; // Optimal between 1.0 - 1.1
+    static final double UTZ_CLUSTER_GOAL = 0.92; // Optimal between 0.92-0.96 (if UTZ_TRIP_GOAL is locked to 0.98)
+    static final double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower
 
     // Simulated annealing
-    public static boolean SA_IN_USE = false;
-    double temperatureAtRandomStart = 400000.0;
-    double temperatureAtJumpStart = 6000.0;
-    double temperatureAtOldValley = 1000;
-    double temperature = temperatureAtRandomStart;
-    double coolingRate = 0.9999999;
-    double coolingReduction = 0.004;
+    static final double TEMPERATURE_RANDOM_START = 400000.0;
+    static final double TEMPERATURE_JUMP_START = 6000.0;
+    static final double TEMPERATURE_OLD_VALLEY = 1000;
+    static double temperature = TEMPERATURE_RANDOM_START;
+    static double coolingRate = 0.9999999;
+    static double coolingReduction = 0.004;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
@@ -102,8 +101,7 @@ public class SantaSolver {
 
     void simulatedAnnealingRandomRoute() {
         createBadRouteRandomly();
-        SA_IN_USE = true;
-        temperature = temperatureAtRandomStart;
+        temperature = TEMPERATURE_RANDOM_START;
         while (true) {
             periodicals();
             tryToExecuteRandomSwap();
@@ -113,8 +111,7 @@ public class SantaSolver {
 
     void simulatedAnnealingJumpStart() {
         createRouteFromScratch();
-        SA_IN_USE = true;
-        temperature = temperatureAtJumpStart;
+        temperature = TEMPERATURE_JUMP_START;
         while (true) {
             periodicals();
             tryToExecuteRandomSwap();
@@ -127,8 +124,7 @@ public class SantaSolver {
         Double val = loadSolution(getFilePath("run237\\santamap52"));
         if (val == null) return;
 
-        SA_IN_USE = true;
-        temperature = temperatureAtOldValley;
+        temperature = TEMPERATURE_OLD_VALLEY;
         REORDER_EXPERIMENT = true;
 
         periodicals();
@@ -211,7 +207,7 @@ public class SantaSolver {
     /** Positive valued proposals always accepted. Negative proposals sometimes, if using Simulated Annealing. */
     boolean acceptProposal(double proposalVal) {
         if (proposalVal < -999999999999.9) return false; // just a speedup
-        if (SA_IN_USE) {
+        if (temperature > 0) {
             if (proposalVal >= 0) return true;
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
@@ -314,7 +310,7 @@ public class SantaSolver {
 
         int sumSA = sol.SAcount[0] + sol.SAcount[1];
         String extras = "";
-        if (SA_IN_USE) {
+        if (temperature == 0) {
             extras += "SA acceptance: " + sol.SAcount[1] + " of " + (sumSA + " ("
                     + formatPercent(sol.SAcount[1] * 1.0 / sumSA) + ")")
                     + " (Temperature " + Math.round(temperature) + ")"
@@ -326,7 +322,7 @@ public class SantaSolver {
     }
 
     void periodicallyShakeIfNeeded() {
-        if (!SA_IN_USE) return;
+        if (temperature == 0) return;
         long now = System.currentTimeMillis();
         if (freezeCheckLastTime == 0) {
             // No shake at the first call of this method
@@ -597,7 +593,7 @@ public class SantaSolver {
         List<Integer> bestIndicesForRemoval = null;
 
         // Create several (greedy, slightly randomized) options for trip to target
-        double sparsity = multiplierToSlightlyExpandMaxSparsity * sparsityMin;
+        double sparsity = SPARSITY_EXPANSION * sparsityMin;
         for (; bestTrip == null; sparsity *= 1.04) { // Usually only 1 iteration. In rare cases the initial sparsity is not enough (because we allowed overfill when calculating lower bound for sparsity)
             double detourModifier = 0.01;
             for (int tripOption = 1; tripOption <= 50; tripOption++) {
@@ -702,7 +698,7 @@ public class SantaSolver {
                 // Add random to heuristic in order to explore many different options for this trip as this function is called many times
                 if (currTrip.weightSum + w[candidateId] < UTZ_TRIP_GOAL * MAX_TRIP_WEIGHT) {
                     // Add random unless we are able to "complete" a trip with this stop
-                    heuristicVal *= (1 + randomSize * rng.nextDouble());
+                    heuristicVal *= (1 + RANDOM_SIZE * rng.nextDouble());
                 }
 
                 if (sparsity <= maxSparsity && heuristicVal < bestHeuristicVal) {
@@ -1075,8 +1071,7 @@ public class SantaSolver {
     void livenessExperiment() {
         //createBadRouteRandomly();
         createRouteFromScratch();
-        SA_IN_USE = true;
-        temperature = temperatureAtJumpStart;
+        temperature = TEMPERATURE_JUMP_START;
         long X = 30000;
         while (true) {
             double meters = sol.calcScore();

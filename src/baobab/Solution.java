@@ -75,8 +75,8 @@ public class Solution {
     }
 
     int calcLiveness() {
-        boolean helper = SA_IN_USE;
-        SA_IN_USE = false;
+        double helper = temperature;
+        temperature = 0;
         int accMoveCount = 0;
         double positiveValSums = 0;
         for (int trip1Index=0; trip1Index<trips.size(); trip1Index++) {
@@ -94,7 +94,7 @@ public class Solution {
                 }
             }
         }
-        SA_IN_USE = helper;
+        temperature = helper;
         System.out.println("        Liveness: " + accMoveCount + " non negative moves available with total value " + positiveValSums);
         return accMoveCount;
     }
