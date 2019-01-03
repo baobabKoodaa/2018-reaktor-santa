@@ -8,4 +8,4 @@ My solution is a mix of heuristics (creating a "smart" route from scratch) and o
 
 ![alt text](3d-visualization-2.png "Visualization 2")
 
-Visualization credit to kllp.
+Visualization credit to henkkuli.

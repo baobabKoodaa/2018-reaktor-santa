@@ -38,12 +38,14 @@ public class SantaSolver {
     static final double UTZ_TRIP_GOAL = 0.98; // 0.989 would be slightly better, but it's much slower
 
     // Simulated annealing
-    static final double TEMPERATURE_RANDOM_START = 400000.0;
+    static final double TEMPERATURE_RANDOM_START = 100000.0;
     static final double TEMPERATURE_JUMP_START = 6000.0;
     static final double TEMPERATURE_OLD_VALLEY = 1000;
     static double temperature = TEMPERATURE_RANDOM_START;
     static double coolingRate = 0.9999999;
-    static double coolingReduction = 0.004;
+    static double coolingReduction = 0.015;
+    static int iteration = 0;
+    static int maxIteration = 1000000000;
 
     // Freeze condition / shaking
     long freezeCheckLastTime = 0;
@@ -233,7 +235,6 @@ public class SantaSolver {
             while (from > to) {
                 int id = trip.ids.remove(from);
                 trip.ids.add(to, id);
-                //System.out.println("    Moved id " + id + " to position " + to);
                 to++;
             }
         }
@@ -247,7 +248,8 @@ public class SantaSolver {
             double P = Math.exp(proposalVal / temperature);
             lastPval = P;
             lastPvalProposalVal = proposalVal;
-            if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
+            //if (rng.nextDouble() < coolingReduction) temperature *= coolingRate;
+            temperature = (1 - (iteration++ * 1.0 / maxIteration)) * TEMPERATURE_RANDOM_START;
             boolean accepted = (P >= rng.nextDouble());
             if (accepted) sol.SAcount[1]++;
             else sol.SAcount[0]++;
